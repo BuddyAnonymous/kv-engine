@@ -1,0 +1,6 @@
+{
+  "data_dir": "data",
+  "block_size": 4096,
+  "memtable_max_entries": 2,
+  "wal_segment_max_records": 1000
+}
