@@ -16,7 +16,7 @@ type Engine struct {
 	cfg config.Config
 	bm  *block.Manager
 	wal *wal.WAL
-	mem *memtable.Memtable
+	mem memtable.Memtable
 	sst *sstable.Manager
 	seq uint64
 }
@@ -26,12 +26,22 @@ func New(cfg config.Config) (*Engine, error) {
 		return nil, err
 	}
 
+	mem, err := memtable.NewByType(
+		cfg.MemtableType,
+		cfg.MemtableMaxEntries,
+		cfg.MemtableMaxBytes,
+		cfg.BTreeDegree,
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	e := &Engine{
 		cfg: cfg,
 		bm:  block.New(cfg.BlockSize),
 		wal: wal.New(),
-		mem: memtable.New(cfg.MemtableMaxEntries),
-		sst: sstable.New(filepath.Join(cfg.DataDir, "sstable", "level0")),
+		mem: mem,
+		sst: sstable.New(filepath.Join(cfg.DataDir, "sstable", "level0"), cfg.MultiFileSSTable),
 	}
 
 	// TODO: WAL replay -> memtable
@@ -42,7 +52,6 @@ func New(cfg config.Config) (*Engine, error) {
 		return nil, err
 	}
 
-	// quick sanity: napravi test file path
 	_ = filepath.Join(cfg.DataDir, "wal")
 	return e, nil
 }

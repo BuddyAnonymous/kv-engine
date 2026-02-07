@@ -1,25 +1,29 @@
 package sstable
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"kv-engine/internal/model"
 )
 
 type Manager struct {
-	dir string
+	dir              string
+	multiFileSSTable bool
 }
 
-func New(dir string) *Manager {
-	return &Manager{dir: dir}
+func New(dir string, multiFileSSTable bool) *Manager {
+	return &Manager{dir: dir, multiFileSSTable: multiFileSSTable}
 }
 
-// format zapisa (minimalno):
-// [keyLen u32][valLen u32][tomb u8][seq u64][key][val]
+// [keyLen uvarint][valLen uvarint][tomb u8][seq uvarint][key][val]
+
 func encodeRecord(r model.Record) []byte {
 	key := []byte(r.Key)
 	val := r.Value
@@ -27,21 +31,59 @@ func encodeRecord(r model.Record) []byte {
 		val = nil
 	}
 
-	buf := make([]byte, 4+4+1+8+len(key)+len(val))
-	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(key)))
-	binary.LittleEndian.PutUint32(buf[4:8], uint32(len(val)))
+	// varint maksimalno 10 bajtova za u64
+	tmp := make([]byte, 10)
+
+	buf := make([]byte, 0, 10+10+1+10+len(key)+len(val))
+
+	// keyLen
+	n := binary.PutUvarint(tmp, uint64(len(key)))
+	buf = append(buf, tmp[:n]...)
+
+	// valLen
+	n = binary.PutUvarint(tmp, uint64(len(val)))
+	buf = append(buf, tmp[:n]...)
+
+	// tomb
 	if r.Tombstone {
-		buf[8] = 1
+		buf = append(buf, 1)
 	} else {
-		buf[8] = 0
+		buf = append(buf, 0)
 	}
-	binary.LittleEndian.PutUint64(buf[9:17], r.Seq)
-	copy(buf[17:17+len(key)], key)
-	copy(buf[17+len(key):], val)
+
+	// seq
+	n = binary.PutUvarint(tmp, r.Seq)
+	buf = append(buf, tmp[:n]...)
+
+	// key + val
+	buf = append(buf, key...)
+	buf = append(buf, val...)
+
 	return buf
 }
 
 func (m *Manager) Flush(records []model.Record) error {
+	if m.multiFileSSTable {
+		err := m.Flush_Data(records)
+		err = m.Flush_Index(records)
+		err = m.Flush_Summary(records)
+		err = m.Flush_Filter(records)
+		err = m.Flush_Merkle(records)
+		if err != nil {
+			return err
+		}
+		return nil
+	} else {
+		err := m.Flush_SingleFile(records)
+		return err
+	}
+}
+
+func (m *Manager) Flush_SingleFile(records []model.Record) error {
+	return nil
+}
+
+func (m *Manager) Flush_Data(records []model.Record) error {
 	if err := os.MkdirAll(m.dir, 0755); err != nil {
 		return err
 	}
@@ -55,18 +97,42 @@ func (m *Manager) Flush(records []model.Record) error {
 	}
 	defer f.Close()
 
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].Key < records[j].Key
+	})
+
 	for _, r := range records {
 		b := encodeRecord(r)
 		if _, err := f.Write(b); err != nil {
 			return err
 		}
 	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *Manager) Flush_Index(records []model.Record) error {
+	return nil
+}
+
+func (m *Manager) Flush_Summary(records []model.Record) error {
+	return nil
+}
+
+func (m *Manager) Flush_Filter(records []model.Record) error {
+	return nil
+}
+
+func (m *Manager) Flush_Merkle(records []model.Record) error {
 	return nil
 }
 
 func (m *Manager) Get(key string) model.GetResult {
 	files, _ := filepath.Glob(filepath.Join(m.dir, "*.data"))
-
+	sort.Strings(files)
 	// najnoviji fajlovi prvo
 	for i := len(files) - 1; i >= 0; i-- {
 		if res, ok := scanFile(files[i], key); ok {
@@ -77,8 +143,8 @@ func (m *Manager) Get(key string) model.GetResult {
 	return model.GetResult{Found: false}
 }
 
-// format koji si koristio u Flush():
-// [keyLen u32][valLen u32][tomb u8][seq u64][key][val]
+// [keyLen uvarint][valLen uvarint][tomb u8][seq uvarint][key][val]
+
 func scanFile(path string, key string) (model.GetResult, bool) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -86,30 +152,46 @@ func scanFile(path string, key string) (model.GetResult, bool) {
 	}
 	defer f.Close()
 
+	r := bufio.NewReader(f)
+
 	for {
-		hdr := make([]byte, 4+4+1+8)
-		_, err := f.Read(hdr)
+		keyLen, err := binary.ReadUvarint(r)
 		if err != nil {
-			return model.GetResult{}, false // EOF
+			if err == io.EOF {
+				return model.GetResult{}, false
+			}
+			return model.GetResult{}, false
 		}
 
-		keyLen := binary.LittleEndian.Uint32(hdr[0:4])
-		valLen := binary.LittleEndian.Uint32(hdr[4:8])
-		tomb := hdr[8] == 1
-		seq := binary.LittleEndian.Uint64(hdr[9:17])
+		valLen, err := binary.ReadUvarint(r)
+		if err != nil {
+			return model.GetResult{}, false
+		}
+
+		tombByte, err := r.ReadByte()
+		if err != nil {
+			return model.GetResult{}, false
+		}
+		tomb := tombByte == 1
+
+		seq, err := binary.ReadUvarint(r)
+		if err != nil {
+			return model.GetResult{}, false
+		}
 
 		kb := make([]byte, keyLen)
-		if _, err := f.Read(kb); err != nil {
+		if _, err := io.ReadFull(r, kb); err != nil {
 			return model.GetResult{}, false
 		}
 
 		vb := make([]byte, valLen)
-		if _, err := f.Read(vb); err != nil {
+		if _, err := io.ReadFull(r, vb); err != nil {
 			return model.GetResult{}, false
 		}
 
 		if string(kb) == key {
 			return model.GetResult{
+				Key:       string(kb),
 				Value:     vb,
 				Found:     true,
 				Tombstone: tomb,
