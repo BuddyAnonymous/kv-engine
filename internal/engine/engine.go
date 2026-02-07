@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 	"path/filepath"
+	"time"
 
 	"kv-engine/internal/block"
 	"kv-engine/internal/config"
@@ -16,7 +17,7 @@ type Engine struct {
 	cfg config.Config
 	bm  *block.Manager
 	wal *wal.WAL
-	mem memtable.Memtable
+	mem memtable.MemtableManagerIface
 	sst *sstable.Manager
 	seq uint64
 }
@@ -26,12 +27,12 @@ func New(cfg config.Config) (*Engine, error) {
 		return nil, err
 	}
 
-	mem, err := memtable.NewByType(
-		cfg.MemtableType,
-		cfg.MemtableMaxEntries,
-		cfg.MemtableMaxBytes,
-		cfg.BTreeDegree,
-	)
+	fact, err := memtable.FactoryFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	mem, err := memtable.NewMemtableManager(cfg.MemtableInstances, fact)
 	if err != nil {
 		return nil, err
 	}
@@ -52,13 +53,16 @@ func New(cfg config.Config) (*Engine, error) {
 		return nil, err
 	}
 
-	_ = filepath.Join(cfg.DataDir, "wal")
 	return e, nil
 }
 
-func (e *Engine) Put(key string, value []byte) error {
+func (e *Engine) Put(key string, value []byte, ttl ...time.Duration) error {
 	e.seq++
-	rec := model.Record{Key: key, Value: value, Tombstone: false, Seq: e.seq}
+	var expiresAt uint64
+	if len(ttl) > 0 {
+		expiresAt = uint64(time.Now().Add(ttl[0]).Unix())
+	}
+	rec := model.Record{Key: key, Value: value, Tombstone: false, Seq: e.seq, ExpiresAt: expiresAt}
 
 	// 1) WAL prvo
 	if err := e.wal.Append(rec); err != nil {
@@ -66,10 +70,13 @@ func (e *Engine) Put(key string, value []byte) error {
 	}
 
 	// 2) Memtable
-	e.mem.Put(rec)
+	flushNeeded, err := e.mem.Put(rec)
+	if err != nil {
+		return err
+	}
 
 	// 3) Flush kad je puna
-	if e.mem.IsFull() {
+	if flushNeeded {
 		return e.flushMemtable()
 	}
 	return nil
@@ -77,12 +84,18 @@ func (e *Engine) Put(key string, value []byte) error {
 
 func (e *Engine) Delete(key string) error {
 	e.seq++
-	rec := model.Record{Key: key, Value: nil, Tombstone: true, Seq: e.seq}
+	rec := model.Record{Key: key, Value: nil, Tombstone: true, Seq: e.seq, ExpiresAt: 0}
 
 	if err := e.wal.Append(rec); err != nil {
 		return err
 	}
-	e.mem.Delete(rec)
+	flushNeeded, err := e.mem.Delete(rec)
+	if err != nil {
+		return err
+	}
+	if flushNeeded {
+		return e.flushMemtable()
+	}
 	return nil
 }
 
@@ -109,14 +122,12 @@ func (e *Engine) Get(key string) ([]byte, bool, error) {
 }
 
 func (e *Engine) flushMemtable() error {
-	// uzmi sortirane zapise + resetuj memtable (postaje prazna)
-	records := e.mem.DrainSorted()
-
-	// napravi novi SSTable fajl i upiši
+	records, ok := e.mem.NextFlushBatch()
+	if !ok {
+		return nil
+	}
 	if err := e.sst.Flush(records); err != nil {
 		return err
 	}
-
-	// (kasnije) nakon uspešnog flush-a: možeš rotirati/čistiti WAL segmente
 	return nil
 }

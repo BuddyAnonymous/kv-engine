@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"kv-engine/internal/cli"
 	"kv-engine/internal/config"
 	"kv-engine/internal/engine"
 )
@@ -23,7 +25,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println("KV engine ready. Commands: PUT k v | GET k | DELETE k | EXIT")
+	fmt.Print(`KV engine ready.
+Formats:
+  PUT(key,value)
+  PUT(key,"value with spaces")
+  PUT(key,value,10s)   // TTL optional: 10s / 5m / 2h
+  GET(key)
+  DELETE(key)
+  EXIT
+`)
 
 	sc := bufio.NewScanner(os.Stdin)
 	for {
@@ -36,53 +46,85 @@ func main() {
 			continue
 		}
 
-		parts := strings.SplitN(line, " ", 3)
-		cmd := strings.ToUpper(parts[0])
+		cmd, args, ok, errMsg := cli.ParseCall(line)
+		if !ok {
+			if errMsg != "" {
+				fmt.Println("parse error:", errMsg)
+			}
+			continue
+		}
 
 		switch cmd {
-		case "PUT":
-			if len(parts) < 3 {
-				fmt.Println("usage: PUT key value")
-				continue
-			}
-			if err := eng.Put(parts[1], []byte(parts[2])); err != nil {
-				fmt.Println("error:", err)
-				continue
-			}
-			fmt.Println("OK")
+		case "EXIT", "QUIT":
+			return
 
 		case "GET":
-			if len(parts) < 2 {
-				fmt.Println("usage: GET key")
+			if len(args) != 1 {
+				fmt.Println("usage: GET(key)")
 				continue
 			}
-			val, ok, err := eng.Get(parts[1])
+			val, found, err := eng.Get(args[0])
 			if err != nil {
 				fmt.Println("error:", err)
 				continue
 			}
-			if !ok {
+			if !found {
 				fmt.Println("(nil)")
 			} else {
 				fmt.Println(string(val))
 			}
 
 		case "DELETE":
-			if len(parts) < 2 {
-				fmt.Println("usage: DELETE key")
+			if len(args) != 1 {
+				fmt.Println("usage: DELETE(key)")
 				continue
 			}
-			if err := eng.Delete(parts[1]); err != nil {
+			if err := eng.Delete(args[0]); err != nil {
 				fmt.Println("error:", err)
 				continue
 			}
 			fmt.Println("OK")
 
-		case "EXIT", "QUIT":
-			return
+		case "PUT":
+			if len(args) != 2 && len(args) != 3 {
+				fmt.Println(`usage:
+  PUT(key,value)
+  PUT(key,value,ttl)  // ttl like 10s, 5m, 2h`)
+				continue
+			}
+
+			key := args[0]
+			value := []byte(args[1])
+
+			// no ttl
+			if len(args) == 2 {
+				if err := eng.Put(key, value); err != nil {
+					fmt.Println("error:", err)
+					continue
+				}
+				fmt.Println("OK")
+				continue
+			}
+
+			// ttl provided
+			dur, err := time.ParseDuration(args[2])
+			if err != nil {
+				fmt.Println("invalid TTL, use 10s, 5m, 2h")
+				continue
+			}
+
+			if err := eng.Put(key, value, dur); err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println("OK")
 
 		default:
 			fmt.Println("unknown command")
 		}
+	}
+
+	if err := sc.Err(); err != nil {
+		fmt.Println("input error:", err)
 	}
 }

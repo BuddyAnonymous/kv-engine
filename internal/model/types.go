@@ -5,6 +5,7 @@ type Record struct {
 	Value     []byte
 	Tombstone bool
 	Seq       uint64
+	ExpiresAt uint64
 }
 
 type GetResult struct {
@@ -13,6 +14,7 @@ type GetResult struct {
 	Found     bool
 	Tombstone bool
 	Seq       uint64
+	ExpiresAt uint64
 }
 
 type IndexEntry struct {

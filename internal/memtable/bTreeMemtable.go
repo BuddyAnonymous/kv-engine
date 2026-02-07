@@ -22,9 +22,6 @@ type BTreeMemtable struct {
 }
 
 func NewBTreeMemtable(maxEntries int, maxBytes int64, t int) Memtable {
-	if t < 2 {
-		t = 2
-	}
 	return &BTreeMemtable{
 		maxEntries:   maxEntries,
 		maxBytes:     maxBytes,

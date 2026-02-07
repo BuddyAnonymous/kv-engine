@@ -1,17 +1,25 @@
 package memtable
 
-func NewByType(t string, maxEntries int, maxBytes int64, btreeDegree int) (Memtable, error) {
-	switch t {
+import (
+	"fmt"
+	"kv-engine/internal/config"
+)
+
+func FactoryFromConfig(cfg config.Config) (Factory, error) {
+	switch cfg.MemtableType {
 	case "", "hashmap":
-		return NewHashMapMemtable(maxEntries, maxBytes), nil
-
+		return func() Memtable {
+			return NewHashMapMemtable(cfg.MemtableMaxEntries, cfg.MemtableMaxBytes)
+		}, nil
 	case "skiplist":
-		return NewSkipListMemtable(maxEntries, maxBytes), nil
-
+		return func() Memtable {
+			return NewSkipListMemtable(cfg.MemtableMaxEntries, cfg.MemtableMaxBytes)
+		}, nil
 	case "btree":
-		return NewBTreeMemtable(maxEntries, maxBytes, btreeDegree), nil
-
+		return func() Memtable {
+			return NewBTreeMemtable(cfg.MemtableMaxEntries, cfg.MemtableMaxBytes, cfg.BTreeDegree)
+		}, nil
 	default:
-		return NewHashMapMemtable(maxEntries, maxBytes), nil
+		return nil, fmt.Errorf("unknown memtable_type: %q", cfg.MemtableType)
 	}
 }

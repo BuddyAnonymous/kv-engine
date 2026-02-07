@@ -1,10 +1,11 @@
 {
   "data_dir": "data",
   "block_size": 4096,
-  "memtable_max_entries": 6,
+  "memtable_max_entries": 3,
   "memtable_max_bytes": 1024,
   "wal_segment_max_records": 1000,
   "multi_file_sstable" : true,
-  "memtable_type": "hashmap",
+  "memtable_type": "btree",
+  "memtable_instances": 4,
   "btree_degree": 4
 }

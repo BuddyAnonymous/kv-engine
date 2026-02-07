@@ -15,6 +15,7 @@ type Config struct {
 	MemtableMaxBytes     int64  `json:"memtable_max_bytes"`
 	MemtableType         string `json:"memtable_type"`
 	BTreeDegree          int    `json:"btree_degree"`
+	MemtableInstances    int    `json:"memtable_instances"`
 }
 
 func Default() Config {
@@ -27,6 +28,7 @@ func Default() Config {
 		MemtableMaxBytes:     1024,
 		MemtableType:         "hashmap",
 		BTreeDegree:          16,
+		MemtableInstances:    1,
 	}
 }
 
@@ -76,6 +78,10 @@ func (c *Config) Normalize() {
 		c.BTreeDegree = d.BTreeDegree
 	}
 
+	// MemtableInstances: mora biti >= 1
+	if c.MemtableInstances < 1 {
+		c.MemtableInstances = d.MemtableInstances
+	}
 }
 
 func Load(path string) (Config, error) {
