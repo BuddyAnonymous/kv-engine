@@ -71,6 +71,7 @@ func (bf *BloomFilter) MightContain(data []byte) bool {
 // [0:4] -> m
 // [4:8] -> k
 // [8:]  -> bitset
+// potencijalno ------------ [8:12] seed [12:] bitset
 func (bf *BloomFilter) Serialize() ([]byte, error) {
 	bf.mutex.RLock()
 	defer bf.mutex.RUnlock()
@@ -92,7 +93,7 @@ func (bf *BloomFilter) Serialize() ([]byte, error) {
 	return buf, nil
 }
 
-// DeserializeBloomFilter kreira Bloom filter iz bajtova
+// Deserialize BloomFiltera kreira Bloom filter iz bajtova
 func Deserialize(data []byte) (*BloomFilter, error) {
 	if len(data) < 8 {
 		return nil, ErrInvalidBloomData

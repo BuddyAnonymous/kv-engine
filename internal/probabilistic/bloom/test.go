@@ -29,7 +29,7 @@ func RunBloomFilterTest() {
 	// should be true
 	for _, v := range values {
 		if !bf.MightContain([]byte(v)) {
-			fmt.Println("❌ ERROR: should contain:", v)
+			fmt.Println("ERROR: should contain:", v)
 			return
 		}
 	}
@@ -43,38 +43,38 @@ func RunBloomFilterTest() {
 
 	for _, v := range negatives {
 		if bf.MightContain([]byte(v)) {
-			fmt.Println("⚠️ false positive:", v)
+			fmt.Println("false positive:", v)
 		}
 	}
 
 	// serialize
 	data, err := bf.Serialize()
 	if err != nil {
-		fmt.Println("❌ serialize failed:", err)
+		fmt.Println("serialize failed:", err)
 		return
 	}
 
 	// deserialize
 	bf2, err := Deserialize(data)
 	if err != nil {
-		fmt.Println("❌ deserialize failed:", err)
+		fmt.Println("deserialize failed:", err)
 		return
 	}
 
 	// verify after restore
 	for _, v := range values {
 		if !bf2.MightContain([]byte(v)) {
-			fmt.Println("❌ ERROR after deserialize:", v)
+			fmt.Println("ERROR after deserialize:", v)
 			return
 		}
 	}
 
 	// bitset equality
 	if !bytes.Equal(bf.bitset, bf2.bitset) {
-		fmt.Println("❌ bitset mismatch after deserialize")
+		fmt.Println("bitset mismatch after deserialize")
 		return
 	}
 
-	fmt.Println("✅ Bloom Filter works correctly!")
+	fmt.Println("Bloom Filter works correctly!")
 	fmt.Println("=========================")
 }
