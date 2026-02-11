@@ -1,6 +1,7 @@
 {
   "data_dir": "data",
   "block_size": 4096,
+  "cache_size": 8192,
   "memtable_max_entries": 3,
   "memtable_max_bytes": 1024,
   "wal_segment_max_records": 1000,

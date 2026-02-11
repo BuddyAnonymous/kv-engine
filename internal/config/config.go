@@ -16,6 +16,7 @@ type Config struct {
 	MemtableType         string `json:"memtable_type"`
 	BTreeDegree          int    `json:"btree_degree"`
 	MemtableInstances    int    `json:"memtable_instances"`
+	CacheSize            int    `json:"cache_size"`
 }
 
 func Default() Config {
@@ -29,6 +30,7 @@ func Default() Config {
 		MemtableType:         "hashmap",
 		BTreeDegree:          16,
 		MemtableInstances:    1,
+		CacheSize:            8192,
 	}
 }
 
@@ -81,6 +83,9 @@ func (c *Config) Normalize() {
 	// MemtableInstances: mora biti >= 1
 	if c.MemtableInstances < 1 {
 		c.MemtableInstances = d.MemtableInstances
+	}
+	if c.CacheSize <= 0 {
+		c.CacheSize = d.CacheSize
 	}
 }
 

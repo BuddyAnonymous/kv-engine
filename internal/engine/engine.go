@@ -15,7 +15,7 @@ import (
 
 type Engine struct {
 	cfg config.Config
-	bm  *block.Manager
+	bm  *block.BlockManager
 	wal *wal.WAL
 	mem memtable.MemtableManagerIface
 	sst *sstable.Manager
@@ -39,7 +39,7 @@ func New(cfg config.Config) (*Engine, error) {
 
 	e := &Engine{
 		cfg: cfg,
-		bm:  block.New(cfg.BlockSize),
+		bm:  block.NewBlockManager(cfg.CacheSize),
 		wal: wal.New(),
 		mem: mem,
 		sst: sstable.New(filepath.Join(cfg.DataDir, "sstable", "level0"), cfg.MultiFileSSTable),
