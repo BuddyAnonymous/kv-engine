@@ -38,9 +38,15 @@ func (l *LRUList) Get(key BlockKey) ([]byte, bool) {
 
 // Put dodaje ili osvežava vrednost i premesta je na vrh
 func (l *LRUList) Put(key BlockKey, value []byte) {
+	// Ako entry već postoji, osveži ga i pomeri na vrh
 	if elem, ok := l.table[key]; ok {
+		oldSize := len(elem.Value.(*lruEntry).value)
 		elem.Value.(*lruEntry).value = value
+		l.currentSize += len(value) - oldSize
 		l.ll.MoveToFront(elem)
+		for l.currentSize > l.cacheSize {
+			l.removeOldest()
+		}
 		return
 	}
 

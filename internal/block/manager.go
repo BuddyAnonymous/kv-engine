@@ -114,3 +114,41 @@ func (bm *BlockManager) WriteBlock(path string, blockNum uint64, data []byte, bl
 
 	return nil
 }
+
+// Upis bloka na kraj fajla, vraca broj bloka koji je upisan
+func (bm *BlockManager) AppendBlock(path string, data []byte, blockSize int) (uint64, error) {
+	if len(data) != blockSize {
+		return 0, ErrInvalidBlockSize
+	}
+
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+
+	size := info.Size()
+
+	if size%int64(blockSize) != 0 {
+		return 0, fmt.Errorf("file size %d is not aligned to block size %d", size, blockSize)
+	}
+
+	blockNum := uint64(size / int64(blockSize))
+	offset := size
+
+	_, err = file.WriteAt(data, offset)
+	if err != nil {
+		return 0, err
+	}
+
+	// Upis u cache
+	key := BlockKey{Path: path, BlockNum: blockNum}
+	bm.cache.Put(key, data)
+
+	return blockNum, nil
+}
