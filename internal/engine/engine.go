@@ -37,12 +37,14 @@ func New(cfg config.Config) (*Engine, error) {
 		return nil, err
 	}
 
+	bm := block.NewBlockManager(cfg.CacheSize)
+
 	e := &Engine{
 		cfg: cfg,
-		bm:  block.NewBlockManager(cfg.CacheSize),
+		bm:  bm,
 		wal: wal.New(),
 		mem: mem,
-		sst: sstable.New(filepath.Join(cfg.DataDir, "sstable", "level0"), cfg.MultiFileSSTable),
+		sst: sstable.New(filepath.Join(cfg.DataDir, "sstable", "level0"), cfg.MultiFileSSTable, bm, cfg.BlockSize, uint64(cfg.SummaryStride)),
 	}
 
 	// TODO: WAL replay -> memtable
@@ -77,6 +79,7 @@ func (e *Engine) Put(key string, value []byte, ttl ...time.Duration) error {
 
 	// 3) Flush kad je puna
 	if flushNeeded {
+
 		return e.flushMemtable()
 	}
 	return nil
@@ -102,15 +105,6 @@ func (e *Engine) Delete(key string) error {
 func (e *Engine) Get(key string) ([]byte, bool, error) {
 	// 1) Memtable
 	r := e.mem.Get(key)
-	if r.Found {
-		if r.Tombstone {
-			return nil, false, nil
-		}
-		return r.Value, true, nil
-	}
-
-	// 2) SSTable
-	r = e.sst.Get(key)
 	if r.Found {
 		if r.Tombstone {
 			return nil, false, nil

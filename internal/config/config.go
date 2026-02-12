@@ -17,6 +17,7 @@ type Config struct {
 	BTreeDegree          int    `json:"btree_degree"`
 	MemtableInstances    int    `json:"memtable_instances"`
 	CacheSize            int    `json:"cache_size"`
+	SummaryStride        uint   `json:"summary_stride"`
 }
 
 func Default() Config {
@@ -31,6 +32,7 @@ func Default() Config {
 		BTreeDegree:          16,
 		MemtableInstances:    1,
 		CacheSize:            8192,
+		SummaryStride:        4,
 	}
 }
 
@@ -84,8 +86,15 @@ func (c *Config) Normalize() {
 	if c.MemtableInstances < 1 {
 		c.MemtableInstances = d.MemtableInstances
 	}
+
+	// CacheSize: mora biti >= 0
 	if c.CacheSize <= 0 {
 		c.CacheSize = d.CacheSize
+	}
+
+	// SummaryStride: mora biti >= 1
+	if c.SummaryStride < 1 {
+		c.SummaryStride = d.SummaryStride
 	}
 }
 
