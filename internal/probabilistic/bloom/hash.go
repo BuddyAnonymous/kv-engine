@@ -16,7 +16,7 @@ func (h HashWithSeed) Hash(data []byte) uint64 {
 	return binary.BigEndian.Uint64(fn.Sum(nil))
 }
 
-func CreateHashFunctions(k uint32) []HashWithSeed {
+func CreateHashFunctions(k uint32) ([]HashWithSeed, uint32) {
 	h := make([]HashWithSeed, k)
 	ts := uint32(time.Now().Unix())
 	for i := uint32(0); i < k; i++ {
@@ -25,5 +25,18 @@ func CreateHashFunctions(k uint32) []HashWithSeed {
 		hfn := HashWithSeed{Seed: seed}
 		h[i] = hfn
 	}
+	return h, ts
+}
+
+func CreateHashFunctionsWithSeed(k uint32, baseSeed uint32) []HashWithSeed {
+	h := make([]HashWithSeed, k)
+
+	for i := uint32(0); i < k; i++ {
+		seedBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(seedBytes, baseSeed+i)
+
+		h[i] = HashWithSeed{Seed: seedBytes}
+	}
+
 	return h
 }

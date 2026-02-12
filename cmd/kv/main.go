@@ -14,9 +14,7 @@ import (
 )
 
 func main() {
-
-	bloom.RunBloomFilterTest()
-
+	bloom.RunBloomFilterTests()
 	cfg, err := config.Load("config.json")
 	if err != nil {
 		fmt.Println("config error:", err)

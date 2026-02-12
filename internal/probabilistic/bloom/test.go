@@ -5,76 +5,78 @@ import (
 	"fmt"
 )
 
-func RunBloomFilterTest() {
-	fmt.Println("=== Bloom Filter Test ===")
-
-	// parametri
+func RunBloomFilterTests() {
+	fmt.Println("=== Bloom Filter Basic Test ===")
 	expected := 100
 	fpRate := 0.01
 
 	bf := NewBloomFilter(expected, fpRate)
 
-	// test podaci
-	values := []string{
-		"apple",
-		"banana",
-		"cherry",
-	}
+	values := []string{"apple", "banana", "cherry"}
 
-	// add
+	// Add elements
 	for _, v := range values {
 		bf.Add([]byte(v))
 	}
 
-	// should be true
+	// Check inserted elements
+	allContained := true
 	for _, v := range values {
 		if !bf.MightContain([]byte(v)) {
-			fmt.Println("ERROR: should contain:", v)
-			return
+			fmt.Println("❌ ERROR: Bloom filter should contain", v)
+			allContained = false
 		}
 	}
-
-	// should probably be false
-	negatives := []string{
-		"pear",
-		"grape",
-		"mango",
+	if allContained {
+		fmt.Println("✅ All inserted elements present")
 	}
 
+	// Check false positives
+	negatives := []string{"pear", "grape", "mango"}
 	for _, v := range negatives {
 		if bf.MightContain([]byte(v)) {
-			fmt.Println("false positive:", v)
+			fmt.Println("⚠️ Possible false positive detected for", v)
 		}
 	}
 
-	// serialize
+	fmt.Println("\n=== Bloom Filter Serialize/Deserialize Test ===")
 	data, err := bf.Serialize()
 	if err != nil {
-		fmt.Println("serialize failed:", err)
+		fmt.Println("❌ Serialize failed:", err)
 		return
 	}
 
-	// deserialize
 	bf2, err := Deserialize(data)
 	if err != nil {
-		fmt.Println("deserialize failed:", err)
+		fmt.Println("❌ Deserialize failed:", err)
 		return
 	}
 
-	// verify after restore
+	// Check restored filter contains inserted values
+	allContained = true
 	for _, v := range values {
 		if !bf2.MightContain([]byte(v)) {
-			fmt.Println("ERROR after deserialize:", v)
-			return
+			fmt.Println("❌ ERROR: Deserialized Bloom filter missing value", v)
+			allContained = false
 		}
 	}
-
-	// bitset equality
-	if !bytes.Equal(bf.bitset, bf2.bitset) {
-		fmt.Println("bitset mismatch after deserialize")
-		return
+	if allContained {
+		fmt.Println("✅ All elements correctly restored after deserialize")
 	}
 
-	fmt.Println("Bloom Filter works correctly!")
+	// Verify bitset equality
+	if !bytes.Equal(bf.bitset, bf2.bitset) {
+		fmt.Println("❌ Bitset mismatch after deserialize")
+	} else {
+		fmt.Println("✅ Bitset matches after deserialize")
+	}
+
+	// Verify seed equality
+	if bf.seed != bf2.seed {
+		fmt.Println("❌ Seed mismatch after deserialize")
+	} else {
+		fmt.Println("✅ Seed matches after deserialize")
+	}
+
 	fmt.Println("=========================")
 }
