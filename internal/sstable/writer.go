@@ -23,7 +23,7 @@ func (m *Manager) WriteMultiFile(path string, records []model.Record) error {
 		return fmt.Errorf("invalid blockSize=%d", m.blockSize)
 	}
 	if len(records) == 0 {
-
+		return nil
 	}
 
 	dataPath := path + ".data"
@@ -95,6 +95,11 @@ func (m *Manager) writeDataFile(dataPath string, recs []model.Record) ([]string,
 
 	//Prvi ključevi svakog data bloka, koji će ići u INDEX fajl kao blockFirstKey.
 	var firstKeys []string
+	ensureBlockSlot := func(blockNo uint64) {
+		for len(firstKeys) <= int(blockNo) {
+			firstKeys = append(firstKeys, "")
+		}
+	}
 
 	prevKey := ""
 
@@ -102,6 +107,7 @@ func (m *Manager) writeDataFile(dataPath string, recs []model.Record) ([]string,
 
 	bw.SetOnNewBlock(func(blockNo uint64, isFirst bool) error {
 		prevKey = ""
+		ensureBlockSlot(blockNo)
 		if isFirst {
 			return bw.writeBytes(m.encodeHeader(m.dataMagic))
 		}
@@ -127,13 +133,11 @@ func (m *Manager) writeDataFile(dataPath string, recs []model.Record) ([]string,
 			if err != nil {
 				return nil, err
 			}
-			firstKeys = append(firstKeys, r.Key)
 		} else if prevKey == "" {
 			recBytes, newPrevKey, err = m.encodeDataRecord("", r)
 			if err != nil {
 				return nil, err
 			}
-			firstKeys = append(firstKeys, r.Key)
 		}
 		if bw.pos+len(recBytes) > bw.payloadAreaSize() {
 			// FIRST: upiši koliko može u ovaj blok
@@ -148,7 +152,7 @@ func (m *Manager) writeDataFile(dataPath string, recs []model.Record) ([]string,
 				if err := bw.flushCurBlock(); err != nil {
 					return nil, err
 				}
-				firstKeys = append(firstKeys, r.Key) // prvi record u novom bloku -> full key
+
 				dataHeaderBytes, err = encodeDataHeader("", r)
 				if err != nil {
 					return nil, err
@@ -157,10 +161,21 @@ func (m *Manager) writeDataFile(dataPath string, recs []model.Record) ([]string,
 				bw.curBlock = make([]byte, bw.blockSize)
 				bw.pos = payloadLenBytes
 				if bw.onNewBlock != nil {
-					if err := bw.onNewBlock(bw.curBlockNo, false); err != nil {
+				if err := bw.onNewBlock(bw.curBlockNo, false); err != nil {
 						return nil, err
 					}
 				}
+
+				// Record sada pocinje u novom bloku, mora biti full-key enkodovan.
+				recBytes, newPrevKey, err = m.encodeDataRecord("", r)
+				if err != nil {
+					return nil, err
+				}
+			}
+
+			ensureBlockSlot(bw.curBlockNo)
+			if firstKeys[bw.curBlockNo] == "" {
+				firstKeys[bw.curBlockNo] = r.Key
 			}
 
 			firstChunkLen := bw.payloadAreaSize() - bw.pos
@@ -261,10 +276,15 @@ func (m *Manager) writeDataFile(dataPath string, recs []model.Record) ([]string,
 				if err := bw.flushCurBlock(); err != nil {
 					return nil, err
 				}
-				firstKeys = append(firstKeys, "") // prvi record u novom bloku -> full key
 			}
 			// fragmentacija je završila upis za ovaj record -> preskoči normalan writeBytes(recBytes)
+			prevKey = newPrevKey
 			continue
+		}
+
+		ensureBlockSlot(bw.curBlockNo)
+		if firstKeys[bw.curBlockNo] == "" {
+			firstKeys[bw.curBlockNo] = r.Key
 		}
 
 		if err := bw.writeBytes(recBytes); err != nil {
@@ -349,8 +369,11 @@ func (m *Manager) writeIndexFile(indexPath string, dataFirstKeys []string) ([]in
 func (m *Manager) writeSummaryFile(summaryPath string, locs []indexEntryLoc, dataFirstKeys []string, maxKey string) error {
 
 	minKey := ""
-	if len(dataFirstKeys) > 0 {
-		minKey = dataFirstKeys[0]
+	for _, k := range dataFirstKeys {
+		if k != "" {
+			minKey = k
+			break
+		}
 	}
 
 	prevKey := ""
@@ -392,14 +415,22 @@ func (m *Manager) writeSummaryFile(summaryPath string, locs []indexEntryLoc, dat
 		}
 	}
 
-	maxN := len(locs)
-	if len(dataFirstKeys) < maxN {
-		maxN = len(dataFirstKeys)
+	stride := int(m.summaryStride)
+	if stride <= 0 {
+		return fmt.Errorf("invalid summaryStride=%d", m.summaryStride)
 	}
 
-	for i := uint64(0); i < uint64(maxN); i += m.summaryStride {
-		key := dataFirstKeys[i]
-		indexBlockNo := locs[i].indexBlockNo // blockNumber u .index
+	for i := 0; i < len(locs); i += stride {
+		loc := locs[i]
+		if loc.indexEntryNo >= uint64(len(dataFirstKeys)) {
+			return fmt.Errorf("summary/index mismatch: indexEntryNo=%d out of range", loc.indexEntryNo)
+		}
+
+		key := dataFirstKeys[loc.indexEntryNo]
+		if key == "" {
+			continue
+		}
+		indexBlockNo := loc.indexBlockNo // blockNumber u .index
 
 		entryBytes, newPrevKey := encodeSummaryEntry(prevKey, key, indexBlockNo)
 
@@ -408,7 +439,11 @@ func (m *Manager) writeSummaryFile(summaryPath string, locs []indexEntryLoc, dat
 			return err
 		}
 		// ako smo u novom bloku, mora full key (prevKey="")
-		if bw.pos == 0 {
+		if bw.pos == payloadLenBytes {
+
+
+
+
 			entryBytes, newPrevKey = encodeSummaryEntry("", key, indexBlockNo)
 		}
 
