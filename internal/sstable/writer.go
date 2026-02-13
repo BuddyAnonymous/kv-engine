@@ -1,6 +1,7 @@
 package sstable
 
 import (
+	"encoding/binary"
 	"fmt"
 
 	"kv-engine/internal/block"
@@ -120,11 +121,7 @@ func (m *Manager) writeDataFile(dataPath string, recs []model.Record) ([]string,
 			return nil, err
 		}
 
-		// ako ne staje, pređi u novi blok pa re-encode sa prevKey=""
-		if err := bw.ensure(len(recBytes)); err != nil {
-			return nil, err
-		}
-		if bw.pos == 0 {
+		if bw.pos == payloadLenBytes {
 			// prvi record u novom bloku: full key
 			recBytes, newPrevKey, err = m.encodeDataRecord("", r)
 			if err != nil {
@@ -132,8 +129,142 @@ func (m *Manager) writeDataFile(dataPath string, recs []model.Record) ([]string,
 			}
 			firstKeys = append(firstKeys, r.Key)
 		} else if prevKey == "" {
-
+			recBytes, newPrevKey, err = m.encodeDataRecord("", r)
+			if err != nil {
+				return nil, err
+			}
 			firstKeys = append(firstKeys, r.Key)
+		}
+		if bw.pos+len(recBytes) > bw.payloadAreaSize() {
+			// FIRST: upiši koliko može u ovaj blok
+
+			dataHeaderBytes, err := encodeDataHeader(prevKey, r)
+
+			if err != nil {
+				return nil, err
+			}
+			// Ukoliko header ne staje u ostatak bloka, flushuj trenutni blok i otvori novi
+			if len(dataHeaderBytes) > bw.payloadAreaSize()-bw.pos {
+				if err := bw.flushCurBlock(); err != nil {
+					return nil, err
+				}
+				firstKeys = append(firstKeys, r.Key) // prvi record u novom bloku -> full key
+				dataHeaderBytes, err = encodeDataHeader("", r)
+				if err != nil {
+					return nil, err
+				}
+				bw.curBlockNo++
+				bw.curBlock = make([]byte, bw.blockSize)
+				bw.pos = payloadLenBytes
+				if bw.onNewBlock != nil {
+					if err := bw.onNewBlock(bw.curBlockNo, false); err != nil {
+						return nil, err
+					}
+				}
+			}
+
+			firstChunkLen := bw.payloadAreaSize() - bw.pos
+
+			if firstChunkLen > len(recBytes) {
+				firstChunkLen = len(recBytes)
+			} else {
+				recBytes[0] = (recBytes[0] &^ 0b11) | 0b10 // postavi FIRST bit u RecFlags (ako je fragmentiran, tj. ako ne staje ceo record u blok)
+			}
+
+			if err := bw.writeBytes(recBytes[:firstChunkLen]); err != nil {
+				return nil, err
+			}
+
+			rest := recBytes[firstChunkLen:]
+			if len(rest) > 0 {
+				// zatvori trenutni blok
+				if err := bw.flushCurBlock(); err != nil {
+					return nil, err
+				}
+			}
+
+			// piši ostatak kroz nove blokove
+			for len(rest) > 0 {
+				// pripremi novi blok
+				bw.curBlockNo++
+				bw.curBlock = make([]byte, bw.blockSize)
+				bw.pos = payloadLenBytes
+
+				if bw.onNewBlock != nil {
+					if err := bw.onNewBlock(bw.curBlockNo, false); err != nil {
+						return nil, err
+					}
+				}
+
+				space := bw.payloadAreaSize() - bw.pos
+
+				var tmp [10]byte
+				ulen := binary.PutUvarint(tmp[:], uint64(len(rest))) // koliko bajtova zauzima varint za len(rest)
+
+				if 1+ulen+len(rest) <= space {
+					// LAST (poslednji fragment)
+					// recFlags: zadnja 2 bita = LAST (01)
+					flags := byte(0b01)
+
+					if err := bw.writeBytes([]byte{flags}); err != nil {
+						return nil, err
+					}
+					if err := bw.writeBytes(tmp[:ulen]); err != nil {
+						return nil, err
+					}
+					if err := bw.writeBytes(rest); err != nil {
+						return nil, err
+					}
+
+					rest = nil
+					break
+				}
+
+				if space < 3 {
+					if err := bw.flushCurBlock(); err != nil {
+						return nil, err
+					}
+					continue
+				}
+
+				maxChunk := space - 1 // ostavi 1B za flags
+				if maxChunk > len(rest) {
+					maxChunk = len(rest)
+				}
+
+				for maxChunk > 0 {
+					ulen := binary.PutUvarint(tmp[:], uint64(maxChunk))
+					if 1+ulen+maxChunk <= space {
+						// recFlags: zadnja 2 bita = MIDDLE (11)
+						flags := byte(0b11)
+
+						if err := bw.writeBytes([]byte{flags}); err != nil {
+							return nil, err
+						}
+						if err := bw.writeBytes(tmp[:ulen]); err != nil {
+							return nil, err
+						}
+						if err := bw.writeBytes(rest[:maxChunk]); err != nil {
+							return nil, err
+						}
+
+						rest = rest[maxChunk:]
+						break
+					}
+					maxChunk--
+				}
+
+				if maxChunk == 0 {
+					return nil, fmt.Errorf("not enough space in block for MIDDLE fragment header")
+				}
+
+				if err := bw.flushCurBlock(); err != nil {
+					return nil, err
+				}
+				firstKeys = append(firstKeys, "") // prvi record u novom bloku -> full key
+			}
+			// fragmentacija je završila upis za ovaj record -> preskoči normalan writeBytes(recBytes)
+			continue
 		}
 
 		if err := bw.writeBytes(recBytes); err != nil {
@@ -178,6 +309,10 @@ func (m *Manager) writeIndexFile(indexPath string, dataFirstKeys []string) ([]in
 	}
 
 	for i, fk := range dataFirstKeys {
+		if fk == "" {
+			// ovaj data blok nema record, preskoči index entry (ne treba indexirati prazne blokove)
+			continue
+		}
 		// encode prema trenutnom prevKey
 		entryBytes, newPrevKey := encodeIndexEntry(prevKey, fk, uint64(i))
 
@@ -187,7 +322,7 @@ func (m *Manager) writeIndexFile(indexPath string, dataFirstKeys []string) ([]in
 		}
 
 		// ako smo prešli u novi blok, mora full key (prevKey="")
-		if bw.pos == 0 {
+		if bw.pos == payloadLenBytes || bw.pos == 0 {
 			entryBytes, newPrevKey = encodeIndexEntry("", fk, uint64(i))
 		}
 

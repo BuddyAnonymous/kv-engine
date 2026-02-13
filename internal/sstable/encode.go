@@ -29,11 +29,6 @@ func (m *Manager) encodeDataRecord(prevKey string, r model.Record) ([]byte, stri
 	// Ako nema TTL: expiresAt = 0
 	var expiresAt uint64 = r.ExpiresAt
 
-	// --- Frag ---
-	// TODO: implementirati fragmentaciju vrednosti ako je prevelika za jedan blok (ako valLen + overhead > blockSize)
-	var fragLen uint64 = 0
-	var fragBytes []byte = nil
-
 	// --- Value ---
 	val := r.Value
 	if r.Tombstone {
@@ -59,10 +54,6 @@ func (m *Manager) encodeDataRecord(prevKey string, r model.Record) ([]byte, stri
 	buf.Write(uvarintBytes(r.Seq))
 	buf.Write(uvarintBytes(valLen))
 	buf.Write(val)
-	buf.Write(uvarintBytes(fragLen))
-	if fragLen > 0 {
-		buf.Write(fragBytes)
-	}
 
 	return buf.Bytes(), key, nil
 }
@@ -95,4 +86,27 @@ func encodeSummaryEntry(prevKey, key string, indexBlockNo uint64) ([]byte, strin
 	buf.WriteString(suffix)
 	buf.Write(uvarintBytes(indexBlockNo)) // INDEXOFFSET = blockNumber u index fajlu
 	return buf.Bytes(), key
+}
+
+func encodeDataHeader(prevKey string, r model.Record) (hdr []byte, err error) {
+	var buf bytes.Buffer
+
+	recFlags := byte(0)
+	if r.Tombstone {
+		recFlags |= (1 << 2)
+	}
+	shared := sharedPrefixLen(prevKey, r.Key)
+	suffix := r.Key[shared:]
+
+	buf.WriteByte(recFlags)
+
+	expiresAt := r.ExpiresAt
+	buf.Write(uvarintBytes(expiresAt))
+	buf.Write(uvarintBytes(uint64(shared)))
+	buf.Write(uvarintBytes(uint64(len(suffix))))
+	buf.WriteString(suffix)
+	buf.Write(uvarintBytes(r.Seq))
+	buf.Write(uvarintBytes(uint64(len(r.Value)))) // valLen
+
+	return buf.Bytes(), nil
 }
