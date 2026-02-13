@@ -27,7 +27,7 @@ func (m *Manager) encodeDataRecord(prevKey string, r model.Record) ([]byte, stri
 
 	// --- TTL / expiresAt ---
 	// Ako nema TTL: expiresAt = 0
-	var expiresAt uint64 = 0
+	var expiresAt uint64 = r.ExpiresAt
 
 	// --- Frag ---
 	// TODO: implementirati fragmentaciju vrednosti ako je prevelika za jedan blok (ako valLen + overhead > blockSize)

@@ -7,7 +7,10 @@ import (
 	"kv-engine/internal/model"
 )
 
-const crcBytes = 4
+const (
+	crcBytes        = 4
+	payloadLenBytes = 4
+)
 
 // ---------- Public API ----------
 
@@ -73,8 +76,6 @@ func (w *blockWriter) SetOnNewBlock(cb func(blockNo uint64, isFirstBlock bool) e
 	w.onNewBlock = cb
 }
 
-func (w *blockWriter) payloadCap() int { return w.blockSize - crcBytes }
-
 func newBlockWriter(bm *block.BlockManager, path string, blockSize int, onNewBlock func(blockNo uint64, isFirstBlock bool) error) *blockWriter {
 	return &blockWriter{
 		bm:         bm,
@@ -82,7 +83,7 @@ func newBlockWriter(bm *block.BlockManager, path string, blockSize int, onNewBlo
 		blockSize:  blockSize,
 		curBlock:   make([]byte, blockSize),
 		curBlockNo: 0,
-		pos:        0,
+		pos:        payloadLenBytes, // rezerviši početak bloka za payload size
 		onNewBlock: onNewBlock,
 	}
 }

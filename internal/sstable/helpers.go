@@ -10,7 +10,7 @@ func (w *blockWriter) ensure(n int) error {
 	if n > w.payloadCap() {
 		return fmt.Errorf("record too large for single block payload: need=%d cap=%d", n, w.payloadCap())
 	}
-	if w.pos+n <= w.payloadCap() {
+	if w.pos+n <= payloadLenBytes+w.payloadCap() {
 		return nil
 	}
 	if err := w.flushCurBlock(); err != nil {
@@ -18,11 +18,19 @@ func (w *blockWriter) ensure(n int) error {
 	}
 	w.curBlockNo++
 	w.curBlock = make([]byte, w.blockSize)
-	w.pos = 0
+	w.pos = payloadLenBytes
 	if w.onNewBlock != nil {
 		return w.onNewBlock(w.curBlockNo, false)
 	}
 	return nil
+}
+
+func (w *blockWriter) payloadCap() int {
+	return w.blockSize - crcBytes - payloadLenBytes
+}
+
+func (w *blockWriter) payloadAreaSize() int {
+	return w.blockSize - crcBytes
 }
 
 func (w *blockWriter) writeBytes(b []byte) error {
@@ -35,8 +43,10 @@ func (w *blockWriter) writeBytes(b []byte) error {
 }
 
 func (w *blockWriter) flushCurBlock() error {
-	crc := crc32.ChecksumIEEE(w.curBlock[:w.payloadCap()])
-	binary.LittleEndian.PutUint32(w.curBlock[w.payloadCap():], crc)
+	payloadLen := w.pos - payloadLenBytes
+	binary.LittleEndian.PutUint32(w.curBlock[0:payloadLenBytes], uint32(payloadLen))
+	crc := crc32.ChecksumIEEE(w.curBlock[:w.payloadAreaSize()])
+	binary.LittleEndian.PutUint32(w.curBlock[w.payloadAreaSize():], crc)
 	return w.bm.WriteBlock(w.path, w.curBlockNo, w.curBlock, w.blockSize)
 }
 
