@@ -161,7 +161,7 @@ func (m *Manager) writeDataFile(dataPath string, recs []model.Record) ([]string,
 				bw.curBlock = make([]byte, bw.blockSize)
 				bw.pos = payloadLenBytes
 				if bw.onNewBlock != nil {
-				if err := bw.onNewBlock(bw.curBlockNo, false); err != nil {
+					if err := bw.onNewBlock(bw.curBlockNo, false); err != nil {
 						return nil, err
 					}
 				}
@@ -440,9 +440,6 @@ func (m *Manager) writeSummaryFile(summaryPath string, locs []indexEntryLoc, dat
 		}
 		// ako smo u novom bloku, mora full key (prevKey="")
 		if bw.pos == payloadLenBytes {
-
-
-
 
 			entryBytes, newPrevKey = encodeSummaryEntry("", key, indexBlockNo)
 		}

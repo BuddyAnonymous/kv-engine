@@ -103,16 +103,26 @@ func (e *Engine) Delete(key string) error {
 }
 
 func (e *Engine) Get(key string) ([]byte, bool, error) {
+	now := uint64(time.Now().Unix())
+
 	// 1) Memtable
 	r := e.mem.Get(key)
 	if r.Found {
-		if r.Tombstone {
+		if r.Tombstone || (r.ExpiresAt > 0 && r.ExpiresAt <= now) {
 			return nil, false, nil
 		}
 		return r.Value, true, nil
 	}
 
-	return nil, false, nil
+	// 2) SSTable (L0 newest -> oldest)
+	val, found, err := e.sst.Get(key)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return nil, false, nil
+	}
+	return val, true, nil
 }
 
 func (e *Engine) flushMemtable() error {
