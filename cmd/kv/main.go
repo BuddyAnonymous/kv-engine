@@ -10,11 +10,9 @@ import (
 	"kv-engine/internal/cli"
 	"kv-engine/internal/config"
 	"kv-engine/internal/engine"
-	"kv-engine/internal/probabilistic/bloom"
 )
 
 func main() {
-	bloom.RunBloomFilterTests()
 	cfg, err := config.Load("config.json")
 	if err != nil {
 		fmt.Println("config error:", err)

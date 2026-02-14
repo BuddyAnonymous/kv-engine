@@ -1,4 +1,4 @@
-package bloom
+package blooms
 
 import (
 	"crypto/md5"

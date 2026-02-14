@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"sync"
+
+	"kv-engine/internal/probabilistic/blooms"
 )
 
 var (
@@ -11,19 +13,19 @@ var (
 )
 
 type BloomFilter struct {
-	m      uint           // broj bitova
-	k      uint           // broj hash funkcija
-	seed   uint32         // seed za hash funkcije
-	bitset []byte         // bitset
-	hashes []HashWithSeed // hash funkcije
-	mutex  sync.RWMutex   // thread safety
+	m      uint                  // broj bitova
+	k      uint                  // broj hash funkcija
+	seed   uint32                // seed za hash funkcije
+	bitset []byte                // bitset
+	hashes []blooms.HashWithSeed // hash funkcije
+	mutex  sync.RWMutex          // thread safety
 }
 
 // Konstruktor
 func NewBloomFilter(expectedElements int, falsePositiveRate float64) *BloomFilter {
-	m := CalculateM(expectedElements, falsePositiveRate)
-	k := CalculateK(expectedElements, m)
-	hashes, seed := CreateHashFunctions(uint32(k))
+	m := blooms.CalculateM(expectedElements, falsePositiveRate)
+	k := blooms.CalculateK(expectedElements, m)
+	hashes, seed := blooms.CreateHashFunctions(uint32(k))
 
 	return &BloomFilter{
 		m:      m,
@@ -124,6 +126,6 @@ func Deserialize(data []byte) (*BloomFilter, error) {
 		k:      k,
 		seed:   seed,
 		bitset: bitset,
-		hashes: CreateHashFunctionsWithSeed(uint32(k), seed),
+		hashes: blooms.CreateHashFunctionsWithSeed(uint32(k), seed),
 	}, nil
 }
