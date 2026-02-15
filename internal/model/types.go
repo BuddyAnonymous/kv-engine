@@ -24,6 +24,13 @@ const (
 	MergeOpRemove
 )
 
+type ProbMetaAction string
+
+const (
+	ProbMetaActionCreate ProbMetaAction = "create"
+	ProbMetaActionDelete ProbMetaAction = "delete"
+)
+
 type Record struct {
 	Key       string
 	Value     []byte
@@ -78,4 +85,25 @@ type SSTFooter struct {
 	FilterLen     uint64
 	MerkleOffset  uint64
 	MerkleLen     uint64
+}
+
+type ProbMetaRecord struct {
+	Structure StructureType  `json:"structure"`
+	Key       string         `json:"key"`
+	Action    ProbMetaAction `json:"action"`
+	Seq       uint64         `json:"seq"`
+
+	// Bloom Filter params
+	BFExpectedElements  uint64  `json:"bf_expected_elements,omitempty"`
+	BFFalsePositiveRate float64 `json:"bf_false_positive_rate,omitempty"`
+	BFSeed              uint32  `json:"bf_seed,omitempty"`
+
+	// Count-Min Sketch params
+	CMSEpsilon float64 `json:"cms_epsilon,omitempty"`
+	CMSDelta   float64 `json:"cms_delta,omitempty"`
+	CMSSeed    uint32  `json:"cms_seed,omitempty"`
+
+	// HyperLogLog params
+	HLLPrecision uint8  `json:"hll_precision,omitempty"`
+	HLLSeed      uint32 `json:"hll_seed,omitempty"`
 }
