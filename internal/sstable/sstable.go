@@ -51,3 +51,5 @@ func (m *Manager) Flush(records []model.Record) error {
 		return m.WriteSingleFile(basePath, records)
 	}
 }
+
+var _ ManagerIface = (*Manager)(nil)

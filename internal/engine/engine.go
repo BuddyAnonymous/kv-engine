@@ -21,7 +21,7 @@ type Engine struct {
 	bm  *block.BlockManager
 	wal *wal.WAL
 	mem memtable.MemtableManagerIface
-	sst *sstable.Manager
+	sst sstable.ManagerIface
 	seq uint64
 }
 
