@@ -136,6 +136,51 @@ func (m *Manager) GetLatestProbMeta(structure model.StructureType, key string) (
 	return best, found, nil
 }
 
+func (m *Manager) MaxProbMetaSeq() (uint64, error) {
+	p := m.probMetaPath()
+	blockCount, err := m.countBlocks(p, probMetaBlockSize)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	var maxSeq uint64
+	maxPayload := probMetaBlockSize - crcBytes - payloadLenBytes
+	for blockNo := uint64(0); blockNo < blockCount; blockNo++ {
+		blockData, err := m.bm.ReadBlock(p, blockNo, probMetaBlockSize)
+		if err != nil {
+			return 0, err
+		}
+
+		payloadLen := int(binary.LittleEndian.Uint32(blockData[:payloadLenBytes]))
+		if payloadLen < 0 || payloadLen > maxPayload {
+			return 0, fmt.Errorf("invalid probmeta payload length at %s block %d: %d", p, blockNo, payloadLen)
+		}
+		crcWant := binary.LittleEndian.Uint32(blockData[probMetaBlockSize-crcBytes:])
+		crcGot := crc32.ChecksumIEEE(blockData[:probMetaBlockSize-crcBytes])
+		if crcGot != crcWant {
+			return 0, fmt.Errorf("crc mismatch at %s block %d", p, blockNo)
+		}
+		if payloadLen == 0 {
+			continue
+		}
+
+		payload := make([]byte, payloadLen)
+		copy(payload, blockData[payloadLenBytes:payloadLenBytes+payloadLen])
+		if err := decodeProbMetaPayload(payload, func(rec model.ProbMetaRecord) error {
+			if rec.Seq > maxSeq {
+				maxSeq = rec.Seq
+			}
+			return nil
+		}); err != nil {
+			return 0, err
+		}
+	}
+	return maxSeq, nil
+}
+
 func (m *Manager) probMetaPath() string {
 	return filepath.Join(m.dir, "sst.probmeta")
 }

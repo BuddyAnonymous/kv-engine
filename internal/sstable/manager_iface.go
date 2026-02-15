@@ -8,4 +8,5 @@ type ManagerIface interface {
 	GetMergeOperands(structure model.StructureType, key string) ([]model.Record, error)
 	AppendProbMeta(rec model.ProbMetaRecord) error
 	GetLatestProbMeta(structure model.StructureType, key string) (model.ProbMetaRecord, bool, error)
+	MaxProbMetaSeq() (uint64, error)
 }

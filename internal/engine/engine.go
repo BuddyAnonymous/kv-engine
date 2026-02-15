@@ -56,6 +56,13 @@ func New(cfg config.Config) (*Engine, error) {
 	}); err != nil {
 		return nil, err
 	}
+	maxProbMetaSeq, err := e.sst.MaxProbMetaSeq()
+	if err != nil {
+		return nil, err
+	}
+	if maxProbMetaSeq > e.seq {
+		e.seq = maxProbMetaSeq
+	}
 
 	return e, nil
 }
@@ -86,6 +93,13 @@ func (e *Engine) Merge(structure model.StructureType, key string, value []byte, 
 	}
 	if op != model.MergeOpAdd {
 		return fmt.Errorf("invalid merge op type")
+	}
+	meta, found, err := e.sst.GetLatestProbMeta(structure, key)
+	if err != nil {
+		return err
+	}
+	if !found || meta.Action != model.ProbMetaActionCreate {
+		return fmt.Errorf("%s instance is not created for key=%s", structureName(structure), key)
 	}
 
 	e.seq++
@@ -377,6 +391,19 @@ func (e *Engine) getAllMergeOperands(structure model.StructureType, key string) 
 		return bytes.Compare(ops[i].Value, ops[j].Value) < 0
 	})
 	return ops, nil
+}
+
+func structureName(s model.StructureType) string {
+	switch s {
+	case model.StructureTypeBloomFilter:
+		return "bloom_filter"
+	case model.StructureTypeCountMinSketch:
+		return "count_min_sketch"
+	case model.StructureTypeHyperLogLog:
+		return "hyper_log_log"
+	default:
+		return "unknown_structure"
+	}
 }
 
 // applyRecord upisuje record u memtable, a u WAL samo ako zapis nije stigao iz replay-a.
