@@ -22,6 +22,7 @@ type Manager struct {
 	indexMagic    [4]byte
 	summMagic     [4]byte
 	filterMagic   [4]byte
+	merkleMagic   [4]byte
 }
 
 func New(dir string, multiFileSSTable bool, bm *block.BlockManager, blockSize int, summaryStride uint64) *Manager {
@@ -35,6 +36,7 @@ func New(dir string, multiFileSSTable bool, bm *block.BlockManager, blockSize in
 		indexMagic:       [4]byte{'I', 'N', 'D', 'X'},
 		summMagic:        [4]byte{'S', 'U', 'M', 'M'},
 		filterMagic:      [4]byte{'F', 'I', 'L', 'T'},
+		merkleMagic:      [4]byte{'M', 'R', 'K', 'L'},
 	}
 }
 

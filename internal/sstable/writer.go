@@ -31,7 +31,7 @@ func (m *Manager) WriteMultiFile(path string, records []model.Record) error {
 	indexPath := path + ".index"
 	summPath := path + ".summary"
 	filterPath := path + ".filter"
-	// merklePath := path + ".merkle"
+	merklePath := path + ".merkle"
 
 	// napiši .data i skupljaj blockFirstKey za svaki data blok
 	dataFirstKeys, err := m.writeDataFile(dataPath, records)
@@ -52,6 +52,9 @@ func (m *Manager) WriteMultiFile(path string, records []model.Record) error {
 	}
 
 	if err := m.writeFilterFile(filterPath, records); err != nil {
+		return err
+	}
+	if err := m.writeMerkleFile(merklePath, records); err != nil {
 		return err
 	}
 

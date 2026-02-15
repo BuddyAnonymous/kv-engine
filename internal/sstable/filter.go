@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"kv-engine/internal/model"
-	bloom "kv-engine/internal/probabilistic/bloom"
+	"kv-engine/internal/probabilistic/bloom"
 )
 
 const bloomFalsePositiveRate = 0.01

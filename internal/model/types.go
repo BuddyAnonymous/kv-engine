@@ -79,3 +79,12 @@ type SSTFooter struct {
 	MerkleOffset  uint64
 	MerkleLen     uint64
 }
+
+type MerkleValidationResult struct {
+	Valid              bool
+	ChangedLeafIndices []int
+	ExpectedRootHex    string
+	ActualRootHex      string
+	ExpectedLeafCount  int
+	ActualLeafCount    int
+}
