@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	crcBytes        = 4
-	payloadLenBytes = 4
+	crcBytes             = 4
+	payloadLenBytes      = 4
+	fragmentSpillDivisor = 4
 )
 
 // ---------- Public API ----------
@@ -100,6 +101,12 @@ func (m *Manager) writeDataFile(dataPath string, recs []model.Record) ([]string,
 			firstKeys = append(firstKeys, "")
 		}
 	}
+	canMarkFirstKey := func(blockNo uint64, pos int) bool {
+		if blockNo == 0 {
+			return pos == payloadLenBytes+len(m.encodeHeader(m.dataMagic))
+		}
+		return pos == payloadLenBytes
+	}
 
 	prevKey := ""
 
@@ -139,6 +146,31 @@ func (m *Manager) writeDataFile(dataPath string, recs []model.Record) ([]string,
 				return nil, err
 			}
 		}
+		if bw.pos+len(recBytes) > bw.payloadAreaSize() && len(recBytes) <= bw.payloadCap() {
+			remaining := bw.payloadAreaSize() - bw.pos
+			spillThreshold := bw.payloadCap() / fragmentSpillDivisor
+			if spillThreshold < 1 {
+				spillThreshold = 1
+			}
+
+			if remaining < spillThreshold {
+				if err := bw.flushCurBlock(); err != nil {
+					return nil, err
+				}
+				bw.curBlockNo++
+				bw.curBlock = make([]byte, bw.blockSize)
+				bw.pos = payloadLenBytes
+				if bw.onNewBlock != nil {
+					if err := bw.onNewBlock(bw.curBlockNo, false); err != nil {
+						return nil, err
+					}
+				}
+				recBytes, newPrevKey, err = m.encodeDataRecord("", r)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
 		if bw.pos+len(recBytes) > bw.payloadAreaSize() {
 			// FIRST: upiši koliko može u ovaj blok
 
@@ -174,7 +206,7 @@ func (m *Manager) writeDataFile(dataPath string, recs []model.Record) ([]string,
 			}
 
 			ensureBlockSlot(bw.curBlockNo)
-			if firstKeys[bw.curBlockNo] == "" {
+			if firstKeys[bw.curBlockNo] == "" && canMarkFirstKey(bw.curBlockNo, bw.pos) {
 				firstKeys[bw.curBlockNo] = r.Key
 			}
 
@@ -283,7 +315,7 @@ func (m *Manager) writeDataFile(dataPath string, recs []model.Record) ([]string,
 		}
 
 		ensureBlockSlot(bw.curBlockNo)
-		if firstKeys[bw.curBlockNo] == "" {
+		if firstKeys[bw.curBlockNo] == "" && canMarkFirstKey(bw.curBlockNo, bw.pos) {
 			firstKeys[bw.curBlockNo] = r.Key
 		}
 

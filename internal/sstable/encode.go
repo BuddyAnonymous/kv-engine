@@ -3,7 +3,18 @@ package sstable
 import (
 	"bytes"
 	"encoding/binary"
+
 	"kv-engine/internal/model"
+)
+
+const (
+	fragTypeMask   byte = 0b00000011
+	tombstoneMask  byte = 0b00000100
+	kindMask       byte = 0b00001000
+	structureShift uint = 4
+	opShift        uint = 6
+	structureMask  byte = 0b00110000
+	opMask         byte = 0b11000000
 )
 
 // header = 8 bytes: MAGIC(4) + BLOCKSIZE(u16) + FLAGS(u16)
@@ -15,7 +26,7 @@ func (m *Manager) encodeHeader(magic [4]byte) []byte {
 	return h
 }
 
-// encodeDataRecord pravi bytes za jedan record.
+// encodeDataRecord creates encoded bytes for one data record.
 func (m *Manager) encodeDataRecord(prevKey string, r model.Record) ([]byte, string, error) {
 	key := r.Key
 
@@ -25,25 +36,15 @@ func (m *Manager) encodeDataRecord(prevKey string, r model.Record) ([]byte, stri
 	}
 	suffix := key[shared:]
 
-	// --- TTL / expiresAt ---
-	// Ako nema TTL: expiresAt = 0
-	var expiresAt uint64 = r.ExpiresAt
+	expiresAt := r.ExpiresAt
 
-	// --- Value ---
 	val := r.Value
 	if r.Tombstone {
 		val = nil
 	}
 	valLen := uint64(len(val))
 
-	// --- RecFlags ---
-	// FULL (npr. 0b00) ako fragLen==0, inače FIRST/MIDDLE/LAST (npr. 0b01/10/11)
-	// FULL = 0 (poslednja 2 bita 00), a tombstone bit na (bit2 od pozadi).
-	var recFlags byte = 0
-	if r.Tombstone {
-		// "3. bit od nazad" = bit2 , tj maska 0b00000100
-		recFlags |= 0b00000100
-	}
+	recFlags := encodeRecordFlags(r)
 
 	var buf bytes.Buffer
 	buf.WriteByte(recFlags)
@@ -69,7 +70,7 @@ func encodeIndexEntry(prevKey, key string, dataBlockNo uint64) ([]byte, string) 
 	buf.Write(uvarintBytes(uint64(shared)))
 	buf.Write(uvarintBytes(uint64(len(suffix))))
 	buf.WriteString(suffix)
-	buf.Write(uvarintBytes(dataBlockNo)) // DATABLOCKOFFSET = blockNumber
+	buf.Write(uvarintBytes(dataBlockNo))
 	return buf.Bytes(), key
 }
 
@@ -84,19 +85,20 @@ func encodeSummaryEntry(prevKey, key string, indexBlockNo uint64) ([]byte, strin
 	buf.Write(uvarintBytes(uint64(shared)))
 	buf.Write(uvarintBytes(uint64(len(suffix))))
 	buf.WriteString(suffix)
-	buf.Write(uvarintBytes(indexBlockNo)) // INDEXOFFSET = blockNumber u index fajlu
+	buf.Write(uvarintBytes(indexBlockNo))
 	return buf.Bytes(), key
 }
 
 func encodeDataHeader(prevKey string, r model.Record) (hdr []byte, err error) {
 	var buf bytes.Buffer
 
-	recFlags := byte(0)
-	if r.Tombstone {
-		recFlags |= (1 << 2)
-	}
+	recFlags := encodeRecordFlags(r)
 	shared := sharedPrefixLen(prevKey, r.Key)
 	suffix := r.Key[shared:]
+	valLen := uint64(len(r.Value))
+	if r.Tombstone {
+		valLen = 0
+	}
 
 	buf.WriteByte(recFlags)
 
@@ -106,7 +108,20 @@ func encodeDataHeader(prevKey string, r model.Record) (hdr []byte, err error) {
 	buf.Write(uvarintBytes(uint64(len(suffix))))
 	buf.WriteString(suffix)
 	buf.Write(uvarintBytes(r.Seq))
-	buf.Write(uvarintBytes(uint64(len(r.Value)))) // valLen
+	buf.Write(uvarintBytes(valLen))
 
 	return buf.Bytes(), nil
+}
+
+func encodeRecordFlags(r model.Record) byte {
+	var flags byte
+	if r.Tombstone {
+		flags |= tombstoneMask
+	}
+	if r.Kind == model.RecordKindMergeOperand {
+		flags |= kindMask
+	}
+	flags |= byte(r.Structure&0b11) << structureShift
+	flags |= byte(r.Op&0b11) << opShift
+	return flags
 }

@@ -30,6 +30,13 @@ Formats:
   PUT(key,value)
   PUT(key,"value with spaces")
   PUT(key,value,10s)   // TTL optional: 10s / 5m / 2h
+  BF_ADD(key,value) / BF_REMOVE(key,value)
+  BF_GET(key,value)
+  CMS_ADD(key,value) / CMS_REMOVE(key,value)
+  CMS_GET(key,value)
+  HLL_ADD(key,value) / HLL_REMOVE(key,value)
+  HLL_GET(key)
+  // All above also support optional ttl: CMD(key,value,10s)
   GET(key)
   DELETE(key)
   EXIT
@@ -86,38 +93,89 @@ Formats:
 			fmt.Println("OK")
 
 		case "PUT":
-			if len(args) != 2 && len(args) != 3 {
-				fmt.Println(`usage:
-  PUT(key,value)
-  PUT(key,value,ttl)  // ttl like 10s, 5m, 2h`)
-				continue
-			}
-
-			key := args[0]
-			value := []byte(args[1])
-
-			// no ttl
-			if len(args) == 2 {
-				if err := eng.Put(key, value); err != nil {
-					fmt.Println("error:", err)
-					continue
-				}
-				fmt.Println("OK")
-				continue
-			}
-
-			// ttl provided
-			dur, err := time.ParseDuration(args[2])
-			if err != nil {
-				fmt.Println("invalid TTL, use 10s, 5m, 2h")
-				continue
-			}
-
-			if err := eng.Put(key, value, dur); err != nil {
+			if err := runBinaryWriteCommand(args, "PUT", eng.Put); err != nil {
 				fmt.Println("error:", err)
 				continue
 			}
 			fmt.Println("OK")
+
+		case "BF_ADD":
+			if err := runBinaryWriteCommand(args, "BF_ADD", eng.BFAdd); err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println("OK")
+
+		case "BF_REMOVE":
+			if err := runBinaryWriteCommand(args, "BF_REMOVE", eng.BFRemove); err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println("OK")
+
+		case "CMS_ADD":
+			if err := runBinaryWriteCommand(args, "CMS_ADD", eng.CMSAdd); err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println("OK")
+
+		case "CMS_REMOVE":
+			if err := runBinaryWriteCommand(args, "CMS_REMOVE", eng.CMSRemove); err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println("OK")
+
+		case "HLL_ADD":
+			if err := runBinaryWriteCommand(args, "HLL_ADD", eng.HLLAdd); err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println("OK")
+
+		case "HLL_REMOVE":
+			if err := runBinaryWriteCommand(args, "HLL_REMOVE", eng.HLLRemove); err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println("OK")
+
+		case "BF_GET":
+			if len(args) != 2 {
+				fmt.Println("usage: BF_GET(key,value)")
+				continue
+			}
+			ok, err := eng.BFGet(args[0], []byte(args[1]))
+			if err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println(ok)
+
+		case "CMS_GET":
+			if len(args) != 2 {
+				fmt.Println("usage: CMS_GET(key,value)")
+				continue
+			}
+			n, err := eng.CMSGet(args[0], []byte(args[1]))
+			if err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println(n)
+
+		case "HLL_GET":
+			if len(args) != 1 {
+				fmt.Println("usage: HLL_GET(key)")
+				continue
+			}
+			n, err := eng.HLLGet(args[0])
+			if err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println(n)
 
 		default:
 			fmt.Println("unknown command")
@@ -127,4 +185,22 @@ Formats:
 	if err := sc.Err(); err != nil {
 		fmt.Println("input error:", err)
 	}
+}
+
+func runBinaryWriteCommand(args []string, name string, fn func(string, []byte, ...time.Duration) error) error {
+	if len(args) != 2 && len(args) != 3 {
+		return fmt.Errorf("usage:\n  %s(key,value)\n  %s(key,value,ttl)  // ttl like 10s, 5m, 2h", name, name)
+	}
+
+	key := args[0]
+	value := []byte(args[1])
+	if len(args) == 2 {
+		return fn(key, value)
+	}
+
+	dur, err := time.ParseDuration(args[2])
+	if err != nil {
+		return fmt.Errorf("invalid TTL, use 10s, 5m, 2h")
+	}
+	return fn(key, value, dur)
 }

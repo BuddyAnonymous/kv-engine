@@ -23,6 +23,7 @@ type SkipListMemtable struct {
 	entriesNum   int
 	maxBytes     int64
 	currentBytes int64
+	mergeOps     []model.Record
 
 	head     *skipNode
 	level    int
@@ -50,6 +51,15 @@ func NewSkipListMemtable(maxEntries int, maxBytes int64) Memtable {
 }
 
 func (m *SkipListMemtable) Put(r model.Record) {
+	if r.Kind == model.RecordKindMergeOperand {
+		m.mergeOps = append(m.mergeOps, r)
+		m.entriesNum++
+		m.currentBytes += estimateRecordSize(&r)
+		return
+	}
+	r.Structure = model.StructureTypeNone
+	r.Op = model.MergeOpNone
+
 	// update[] za svaku visinu
 	update := make([]*skipNode, m.maxLevel)
 	x := m.head
@@ -111,10 +121,34 @@ func (m *SkipListMemtable) Get(key string) model.GetResult {
 		Found:     true,
 		Tombstone: x.rec.Tombstone,
 		Seq:       x.rec.Seq,
+		ExpiresAt: x.rec.ExpiresAt,
+		Kind:      x.rec.Kind,
+		Structure: x.rec.Structure,
+		Op:        x.rec.Op,
 	}
 }
 
+func (m *SkipListMemtable) GetMergeOperands(structure model.StructureType, key string) []model.Record {
+	if len(m.mergeOps) == 0 {
+		return nil
+	}
+	out := make([]model.Record, 0, len(m.mergeOps))
+	for _, rec := range m.mergeOps {
+		if rec.Kind != model.RecordKindMergeOperand {
+			continue
+		}
+		if rec.Key != key || rec.Structure != structure {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
 func (m *SkipListMemtable) Delete(r model.Record) {
+	r.Kind = model.RecordKindKV
+	r.Structure = model.StructureTypeNone
+	r.Op = model.MergeOpNone
 	r.Tombstone = true
 	r.Value = nil
 	m.Put(r) // isti key overwrite/insert, samo sa tombstone
@@ -130,10 +164,13 @@ func (m *SkipListMemtable) DrainSorted() []model.Record {
 	for x := m.head.forward[0]; x != nil; x = x.forward[0] {
 		out = append(out, x.rec)
 	}
+	out = append(out, m.mergeOps...)
+	sortRecordsForFlush(out)
 
 	// reset
 	m.head = &skipNode{forward: make([]*skipNode, m.maxLevel)}
 	m.level = 1
+	m.mergeOps = nil
 	m.entriesNum = 0
 	m.currentBytes = 0
 

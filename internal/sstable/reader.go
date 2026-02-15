@@ -1,6 +1,7 @@
 package sstable
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -52,7 +53,7 @@ func (m *Manager) Get(key string) ([]byte, bool, error) {
 
 	now := uint64(time.Now().Unix())
 	for _, dataPath := range dataFiles {
-		rec, found, err := m.getFromDataFile(dataPath, key)
+		rec, found, err := m.getLatestKVFromDataFile(dataPath, key)
 		if err != nil {
 			return nil, false, err
 		}
@@ -68,44 +69,215 @@ func (m *Manager) Get(key string) ([]byte, bool, error) {
 	return nil, false, nil
 }
 
-func (m *Manager) getFromDataFile(dataPath, key string) (model.Record, bool, error) {
+func (m *Manager) GetMergeOperands(structure model.StructureType, key string) ([]model.Record, error) {
+	if !m.multiFileSSTable {
+		return nil, fmt.Errorf("single-file sstable merge get is not implemented")
+	}
+	if structure == model.StructureTypeNone {
+		return nil, fmt.Errorf("invalid merge structure type")
+	}
+
+	dataFiles, err := m.listDataFilesNewestFirst()
+	if err != nil {
+		return nil, err
+	}
+	if len(dataFiles) == 0 {
+		return nil, nil
+	}
+
+	now := uint64(time.Now().Unix())
+	var ops []model.Record
+
+	for _, dataPath := range dataFiles {
+		recs, found, err := m.getKeyRecordsFromDataFile(dataPath, key)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue
+		}
+
+		for _, rec := range recs {
+			if rec.Kind != model.RecordKindMergeOperand {
+				continue
+			}
+			if rec.Structure != structure {
+				continue
+			}
+			if rec.Op != model.MergeOpAdd && rec.Op != model.MergeOpRemove {
+				continue
+			}
+			if isExpired(rec, now) {
+				continue
+			}
+
+			ops = append(ops, rec)
+		}
+	}
+
+	sort.SliceStable(ops, func(i, j int) bool {
+		if ops[i].Seq != ops[j].Seq {
+			return ops[i].Seq < ops[j].Seq
+		}
+		if ops[i].Op != ops[j].Op {
+			return ops[i].Op < ops[j].Op
+		}
+		return bytes.Compare(ops[i].Value, ops[j].Value) < 0
+	})
+
+	return ops, nil
+}
+
+func (m *Manager) getLatestKVFromDataFile(dataPath, key string) (model.Record, bool, error) {
+	blockSize, startDataBlock, endDataBlock, ok, err := m.locateDataRangeForAllKeyRecords(dataPath, key)
+	if err != nil {
+		return model.Record{}, false, err
+	}
+	if !ok {
+		return model.Record{}, false, nil
+	}
+	return m.searchDataRangeForLatestKV(dataPath, blockSize, key, startDataBlock, endDataBlock)
+}
+
+func (m *Manager) getKeyRecordsFromDataFile(dataPath, key string) ([]model.Record, bool, error) {
+	blockSize, startDataBlock, endDataBlock, ok, err := m.locateDataRangeForAllKeyRecords(dataPath, key)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return m.searchDataRangeForKey(dataPath, blockSize, key, startDataBlock, endDataBlock)
+}
+
+func (m *Manager) locateDataRangeForAllKeyRecords(dataPath, key string) (blockSize int, startDataBlock, endDataBlock uint64, ok bool, err error) {
 	basePath := strings.TrimSuffix(dataPath, ".data")
 	indexPath := basePath + ".index"
 	summaryPath := basePath + ".summary"
 
 	dataHdr, err := m.readFileHeader(dataPath)
 	if err != nil {
-		return model.Record{}, false, err
+		return 0, 0, 0, false, err
 	}
 	if dataHdr.magic != m.dataMagic {
-		return model.Record{}, false, fmt.Errorf("invalid data magic in %s", dataPath)
+		return 0, 0, 0, false, fmt.Errorf("invalid data magic in %s", dataPath)
 	}
 
 	indexHdr, err := m.readFileHeader(indexPath)
 	if err != nil {
-		return model.Record{}, false, err
+		return 0, 0, 0, false, err
 	}
 	if indexHdr.magic != m.indexMagic {
-		return model.Record{}, false, fmt.Errorf("invalid index magic in %s", indexPath)
+		return 0, 0, 0, false, fmt.Errorf("invalid index magic in %s", indexPath)
 	}
 
 	summaryHdr, err := m.readFileHeader(summaryPath)
 	if err != nil {
-		return model.Record{}, false, err
+		return 0, 0, 0, false, err
 	}
 	if summaryHdr.magic != m.summMagic {
-		return model.Record{}, false, fmt.Errorf("invalid summary magic in %s", summaryPath)
+		return 0, 0, 0, false, fmt.Errorf("invalid summary magic in %s", summaryPath)
 	}
 
 	summ, err := m.readSummaryMeta(summaryPath, summaryHdr.blockSize, key)
 	if err != nil {
-		return model.Record{}, false, err
+		return 0, 0, 0, false, err
 	}
 	if summ.minKey != "" && key < summ.minKey {
-		return model.Record{}, false, nil
+		return 0, 0, 0, false, nil
 	}
 	if summ.maxKey != "" && key > summ.maxKey {
-		return model.Record{}, false, nil
+		return 0, 0, 0, false, nil
+	}
+
+	// Use summary to choose where to start reading index blocks.
+	// For correctness with duplicate keys across blocks, we anchor to the last summary
+	// key that is strictly smaller than target key.
+	startIndexBlock := uint64(0)
+	for _, se := range summ.entries {
+		if se.key < key {
+			startIndexBlock = se.indexBlockNo
+			continue
+		}
+		break
+	}
+
+	indexEntries, err := m.readIndexEntriesFromBlock(indexPath, indexHdr.blockSize, startIndexBlock, key)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	if len(indexEntries) == 0 {
+		return 0, 0, 0, false, nil
+	}
+
+	var (
+		hasPrev   bool
+		predBlock uint64
+	)
+	for _, ie := range indexEntries {
+		if ie.key < key {
+			hasPrev = true
+			predBlock = ie.dataBlockNo
+			continue
+		}
+		break
+	}
+
+	if hasPrev {
+		startDataBlock = predBlock
+	} else {
+		startDataBlock = 0
+	}
+
+	endDataBlock, err = m.countBlocks(dataPath, dataHdr.blockSize)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	if startDataBlock >= endDataBlock {
+		return 0, 0, 0, false, fmt.Errorf("invalid data block range [%d,%d) for %s", startDataBlock, endDataBlock, dataPath)
+	}
+
+	return dataHdr.blockSize, startDataBlock, endDataBlock, true, nil
+}
+
+func (m *Manager) locateDataRangeForKey(dataPath, key string) (blockSize int, startDataBlock, endDataBlock uint64, ok bool, err error) {
+	basePath := strings.TrimSuffix(dataPath, ".data")
+	indexPath := basePath + ".index"
+	summaryPath := basePath + ".summary"
+
+	dataHdr, err := m.readFileHeader(dataPath)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	if dataHdr.magic != m.dataMagic {
+		return 0, 0, 0, false, fmt.Errorf("invalid data magic in %s", dataPath)
+	}
+
+	indexHdr, err := m.readFileHeader(indexPath)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	if indexHdr.magic != m.indexMagic {
+		return 0, 0, 0, false, fmt.Errorf("invalid index magic in %s", indexPath)
+	}
+
+	summaryHdr, err := m.readFileHeader(summaryPath)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	if summaryHdr.magic != m.summMagic {
+		return 0, 0, 0, false, fmt.Errorf("invalid summary magic in %s", summaryPath)
+	}
+
+	summ, err := m.readSummaryMeta(summaryPath, summaryHdr.blockSize, key)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	if summ.minKey != "" && key < summ.minKey {
+		return 0, 0, 0, false, nil
+	}
+	if summ.maxKey != "" && key > summ.maxKey {
+		return 0, 0, 0, false, nil
 	}
 
 	startIndexBlock := uint64(0)
@@ -115,28 +287,135 @@ func (m *Manager) getFromDataFile(dataPath, key string) (model.Record, bool, err
 
 	indexEntries, err := m.readIndexEntriesFromBlock(indexPath, indexHdr.blockSize, startIndexBlock, key)
 	if err != nil {
-		return model.Record{}, false, err
+		return 0, 0, 0, false, err
 	}
 	if len(indexEntries) == 0 {
-		return model.Record{}, false, nil
+		return 0, 0, 0, false, nil
 	}
 
-	startDataBlock := indexEntries[len(indexEntries)-1].dataBlockNo
+	startDataBlock = indexEntries[len(indexEntries)-1].dataBlockNo
 
-	endDataBlock, err := m.countBlocks(dataPath, dataHdr.blockSize)
+	endDataBlock, err = m.countBlocks(dataPath, dataHdr.blockSize)
 	if err != nil {
-		return model.Record{}, false, err
+		return 0, 0, 0, false, err
 	}
 	if startDataBlock >= endDataBlock {
-		return model.Record{}, false, fmt.Errorf("invalid data block range [%d,%d) for %s", startDataBlock, endDataBlock, dataPath)
+		return 0, 0, 0, false, fmt.Errorf("invalid data block range [%d,%d) for %s", startDataBlock, endDataBlock, dataPath)
 	}
 
-	return m.searchDataRange(dataPath, dataHdr.blockSize, key, startDataBlock, endDataBlock)
+	return dataHdr.blockSize, startDataBlock, endDataBlock, true, nil
 }
 
-func (m *Manager) searchDataRange(dataPath string, blockSize int, key string, startBlock, endBlock uint64) (model.Record, bool, error) {
+func (m *Manager) searchDataRangeForKey(dataPath string, blockSize int, key string, startBlock, endBlock uint64) ([]model.Record, bool, error) {
 	prevKey := ""
 	var pending []byte
+	out := make([]model.Record, 0, 1)
+
+	for blockNo := startBlock; blockNo < endBlock; blockNo++ {
+		payload, err := m.readPayloadBlock(dataPath, blockSize, blockNo)
+		if err != nil {
+			return nil, false, err
+		}
+
+		off := 0
+		if blockNo == 0 {
+			if len(payload) < 8 {
+				return nil, false, fmt.Errorf("data header too short in %s", dataPath)
+			}
+			if string(payload[:4]) != string(m.dataMagic[:]) {
+				return nil, false, fmt.Errorf("invalid data magic in %s", dataPath)
+			}
+			off = 8
+		}
+
+		for off < len(payload) {
+			flags := payload[off]
+			fragType := flags & fragTypeMask
+
+			if len(pending) == 0 {
+				switch fragType {
+				case 0b00:
+					rec, consumed, err := decodeDataRecord(payload[off:], prevKey)
+					if err != nil {
+						return nil, false, err
+					}
+					off += consumed
+					prevKey = rec.Key
+
+					if rec.Key == key {
+						out = append(out, rec)
+						continue
+					}
+					if rec.Key > key {
+						return out, len(out) > 0, nil
+					}
+
+				case 0b10:
+					// FIRST fragment: by format, this is the rest of payload bytes in the current block.
+					pending = append(pending, payload[off:]...)
+					off = len(payload)
+
+				case 0b01, 0b11:
+					return nil, false, fmt.Errorf("unexpected continuation fragment in %s block %d", dataPath, blockNo)
+
+				default:
+					return nil, false, fmt.Errorf("unknown fragment flag %d in %s block %d", fragType, dataPath, blockNo)
+				}
+				continue
+			}
+
+			if fragType != 0b01 && fragType != 0b11 {
+				return nil, false, fmt.Errorf("expected continuation fragment in %s block %d", dataPath, blockNo)
+			}
+
+			off++ // flags
+			chunkLen, err := readUvarintAt(payload, &off)
+			if err != nil {
+				return nil, false, err
+			}
+			chunkLenI, err := checkedChunkLen(chunkLen, len(payload)-off, "fragment chunk")
+			if err != nil {
+				return nil, false, fmt.Errorf("fragment chunk out of bounds in %s block %d", dataPath, blockNo)
+			}
+
+			pending = append(pending, payload[off:off+chunkLenI]...)
+			off += chunkLenI
+
+			if fragType == 0b01 {
+				rec, consumed, err := decodeDataRecord(pending, prevKey)
+				if err != nil {
+					return nil, false, err
+				}
+				if consumed != len(pending) {
+					return nil, false, fmt.Errorf("fragment assembly has extra bytes in %s block %d", dataPath, blockNo)
+				}
+				pending = pending[:0]
+				prevKey = rec.Key
+
+				if rec.Key == key {
+					out = append(out, rec)
+					continue
+				}
+				if rec.Key > key {
+					return out, len(out) > 0, nil
+				}
+			}
+		}
+	}
+
+	if len(pending) != 0 {
+		return nil, false, fmt.Errorf("unterminated fragmented record in %s", dataPath)
+	}
+	return out, len(out) > 0, nil
+}
+
+func (m *Manager) searchDataRangeForLatestKV(dataPath string, blockSize int, key string, startBlock, endBlock uint64) (model.Record, bool, error) {
+	prevKey := ""
+	var pending []byte
+	var (
+		best  model.Record
+		found bool
+	)
 
 	for blockNo := startBlock; blockNo < endBlock; blockNo++ {
 		payload, err := m.readPayloadBlock(dataPath, blockSize, blockNo)
@@ -157,7 +436,7 @@ func (m *Manager) searchDataRange(dataPath string, blockSize int, key string, st
 
 		for off < len(payload) {
 			flags := payload[off]
-			fragType := flags & 0b11
+			fragType := flags & fragTypeMask
 
 			if len(pending) == 0 {
 				switch fragType {
@@ -170,14 +449,17 @@ func (m *Manager) searchDataRange(dataPath string, blockSize int, key string, st
 					prevKey = rec.Key
 
 					if rec.Key == key {
-						return rec, true, nil
+						if rec.Kind == model.RecordKindKV && (!found || rec.Seq > best.Seq) {
+							best = rec
+							found = true
+						}
+						continue
 					}
 					if rec.Key > key {
-						return model.Record{}, false, nil
+						return best, found, nil
 					}
 
 				case 0b10:
-					// FIRST fragment: by format, this is the rest of payload bytes in the current block.
 					pending = append(pending, payload[off:]...)
 					off = len(payload)
 
@@ -194,17 +476,17 @@ func (m *Manager) searchDataRange(dataPath string, blockSize int, key string, st
 				return model.Record{}, false, fmt.Errorf("expected continuation fragment in %s block %d", dataPath, blockNo)
 			}
 
-			off++ // flags
+			off++
 			chunkLen, err := readUvarintAt(payload, &off)
 			if err != nil {
 				return model.Record{}, false, err
 			}
-			if off+int(chunkLen) > len(payload) {
+			chunkLenI, err := checkedChunkLen(chunkLen, len(payload)-off, "fragment chunk")
+			if err != nil {
 				return model.Record{}, false, fmt.Errorf("fragment chunk out of bounds in %s block %d", dataPath, blockNo)
 			}
-
-			pending = append(pending, payload[off:off+int(chunkLen)]...)
-			off += int(chunkLen)
+			pending = append(pending, payload[off:off+chunkLenI]...)
+			off += chunkLenI
 
 			if fragType == 0b01 {
 				rec, consumed, err := decodeDataRecord(pending, prevKey)
@@ -218,10 +500,14 @@ func (m *Manager) searchDataRange(dataPath string, blockSize int, key string, st
 				prevKey = rec.Key
 
 				if rec.Key == key {
-					return rec, true, nil
+					if rec.Kind == model.RecordKindKV && (!found || rec.Seq > best.Seq) {
+						best = rec
+						found = true
+					}
+					continue
 				}
 				if rec.Key > key {
-					return model.Record{}, false, nil
+					return best, found, nil
 				}
 			}
 		}
@@ -230,7 +516,7 @@ func (m *Manager) searchDataRange(dataPath string, blockSize int, key string, st
 	if len(pending) != 0 {
 		return model.Record{}, false, fmt.Errorf("unterminated fragmented record in %s", dataPath)
 	}
-	return model.Record{}, false, nil
+	return best, found, nil
 }
 
 func decodeDataRecord(buf []byte, prevKey string) (model.Record, int, error) {
@@ -255,16 +541,18 @@ func decodeDataRecord(buf []byte, prevKey string) (model.Record, int, error) {
 		return model.Record{}, 0, err
 	}
 
-	if int(shared) > len(prevKey) {
+	if shared > uint64(len(prevKey)) {
 		return model.Record{}, 0, fmt.Errorf("invalid shared prefix: %d > %d", shared, len(prevKey))
 	}
-	if off+int(suffixLen) > len(buf) {
+	sharedI := int(shared)
+	suffixLenI, err := checkedChunkLen(suffixLen, len(buf)-off, "suffix")
+	if err != nil {
 		return model.Record{}, 0, fmt.Errorf("suffix out of bounds")
 	}
 
-	suffix := string(buf[off : off+int(suffixLen)])
-	off += int(suffixLen)
-	key := prevKey[:int(shared)] + suffix
+	suffix := string(buf[off : off+suffixLenI])
+	off += suffixLenI
+	key := prevKey[:sharedI] + suffix
 
 	seq, err := readUvarintAt(buf, &off)
 	if err != nil {
@@ -274,17 +562,28 @@ func decodeDataRecord(buf []byte, prevKey string) (model.Record, int, error) {
 	if err != nil {
 		return model.Record{}, 0, err
 	}
-	if off+int(valLen) > len(buf) {
+	valLenI, err := checkedChunkLen(valLen, len(buf)-off, "value")
+	if err != nil {
 		return model.Record{}, 0, fmt.Errorf("value out of bounds")
 	}
 
-	val := make([]byte, int(valLen))
-	copy(val, buf[off:off+int(valLen)])
-	off += int(valLen)
+	val := make([]byte, valLenI)
+	copy(val, buf[off:off+valLenI])
+	off += valLenI
 
-	tombstone := (flags & 0b00000100) != 0
+	tombstone := (flags & tombstoneMask) != 0
+	kind := model.RecordKindKV
+	if (flags & kindMask) != 0 {
+		kind = model.RecordKindMergeOperand
+	}
+	structure := model.StructureType((flags & structureMask) >> structureShift)
+	op := model.MergeOpType((flags & opMask) >> opShift)
 	if tombstone {
 		val = nil
+	}
+	if kind == model.RecordKindKV {
+		structure = model.StructureTypeNone
+		op = model.MergeOpNone
 	}
 
 	rec := model.Record{
@@ -293,6 +592,9 @@ func decodeDataRecord(buf []byte, prevKey string) (model.Record, int, error) {
 		Tombstone: tombstone,
 		Seq:       seq,
 		ExpiresAt: expiresAt,
+		Kind:      kind,
+		Structure: structure,
+		Op:        op,
 	}
 	return rec, off, nil
 }
@@ -326,21 +628,23 @@ func (m *Manager) readSummaryMeta(path string, blockSize int, key string) (summa
 	if err != nil {
 		return summaryMeta{}, err
 	}
-	if off+int(minLen) > len(payload0) {
+	minLenI, err := checkedChunkLen(minLen, len(payload0)-off, "summary minKey")
+	if err != nil {
 		return summaryMeta{}, fmt.Errorf("summary minKey out of bounds in %s", path)
 	}
-	minKey := string(payload0[off : off+int(minLen)])
-	off += int(minLen)
+	minKey := string(payload0[off : off+minLenI])
+	off += minLenI
 
 	maxLen, err := readUvarintAt(payload0, &off)
 	if err != nil {
 		return summaryMeta{}, err
 	}
-	if off+int(maxLen) > len(payload0) {
+	maxLenI, err := checkedChunkLen(maxLen, len(payload0)-off, "summary maxKey")
+	if err != nil {
 		return summaryMeta{}, fmt.Errorf("summary maxKey out of bounds in %s", path)
 	}
-	maxKey := string(payload0[off : off+int(maxLen)])
-	off += int(maxLen)
+	maxKey := string(payload0[off : off+maxLenI])
+	off += maxLenI
 
 	// ako je trazeni key van [min,max], nema potrebe da citamo summary entries.
 	if key != "" {
@@ -393,16 +697,18 @@ func decodeSummaryEntries(payload []byte, start int, targetKey string) ([]summar
 		if err != nil {
 			return nil, err
 		}
-		if int(shared) > len(prevKey) {
+		if shared > uint64(len(prevKey)) {
 			return nil, fmt.Errorf("summary shared prefix out of range")
 		}
-		if off+int(suffixLen) > len(payload) {
+		sharedI := int(shared)
+		suffixLenI, err := checkedChunkLen(suffixLen, len(payload)-off, "summary suffix")
+		if err != nil {
 			return nil, fmt.Errorf("summary suffix out of bounds")
 		}
 
-		suffix := string(payload[off : off+int(suffixLen)])
-		off += int(suffixLen)
-		key := prevKey[:int(shared)] + suffix
+		suffix := string(payload[off : off+suffixLenI])
+		off += suffixLenI
+		key := prevKey[:sharedI] + suffix
 
 		if targetKey != "" && key > targetKey {
 			break
@@ -456,16 +762,18 @@ func (m *Manager) readIndexEntriesFromBlock(path string, blockSize int, startBlo
 			if err != nil {
 				return nil, err
 			}
-			if int(shared) > len(prevKey) {
+			if shared > uint64(len(prevKey)) {
 				return nil, fmt.Errorf("index shared prefix out of range")
 			}
-			if off+int(suffixLen) > len(payload) {
+			sharedI := int(shared)
+			suffixLenI, err := checkedChunkLen(suffixLen, len(payload)-off, "index suffix")
+			if err != nil {
 				return nil, fmt.Errorf("index suffix out of bounds")
 			}
 
-			suffix := string(payload[off : off+int(suffixLen)])
-			off += int(suffixLen)
-			key := prevKey[:int(shared)] + suffix
+			suffix := string(payload[off : off+suffixLenI])
+			off += suffixLenI
+			key := prevKey[:sharedI] + suffix
 
 			dataBlockNo, err := readUvarintAt(payload, &off)
 			if err != nil {
@@ -562,6 +870,16 @@ func readUvarintAt(b []byte, off *int) (uint64, error) {
 	}
 	*off += n
 	return v, nil
+}
+
+func checkedChunkLen(n uint64, available int, what string) (int, error) {
+	if available < 0 {
+		return 0, fmt.Errorf("%s out of bounds", what)
+	}
+	if n > uint64(available) {
+		return 0, fmt.Errorf("%s out of bounds", what)
+	}
+	return int(n), nil
 }
 
 func (m *Manager) listDataFilesNewestFirst() ([]string, error) {

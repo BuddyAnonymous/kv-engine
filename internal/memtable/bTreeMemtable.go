@@ -16,6 +16,7 @@ type BTreeMemtable struct {
 	entriesNum   int
 	maxBytes     int64
 	currentBytes int64
+	mergeOps     []model.Record
 
 	t    int // minimum degree (npr 16 -> max keys = 2t-1)
 	root *btreeNode
@@ -33,6 +34,15 @@ func NewBTreeMemtable(maxEntries int, maxBytes int64, t int) Memtable {
 }
 
 func (m *BTreeMemtable) Put(r model.Record) {
+	if r.Kind == model.RecordKindMergeOperand {
+		m.mergeOps = append(m.mergeOps, r)
+		m.entriesNum++
+		m.currentBytes += estimateRecordSize(&r)
+		return
+	}
+	r.Structure = model.StructureTypeNone
+	r.Op = model.MergeOpNone
+
 	// overwrite ako postoji
 	if old, ok := m.getRecord(r.Key); ok {
 		m.currentBytes -= estimateRecordSize(&old)
@@ -61,14 +71,39 @@ func (m *BTreeMemtable) Get(key string) model.GetResult {
 		return model.GetResult{Found: false}
 	}
 	return model.GetResult{
+		Key:       key,
 		Value:     rec.Value,
 		Found:     true,
 		Tombstone: rec.Tombstone,
 		Seq:       rec.Seq,
+		ExpiresAt: rec.ExpiresAt,
+		Kind:      rec.Kind,
+		Structure: rec.Structure,
+		Op:        rec.Op,
 	}
 }
 
+func (m *BTreeMemtable) GetMergeOperands(structure model.StructureType, key string) []model.Record {
+	if len(m.mergeOps) == 0 {
+		return nil
+	}
+	out := make([]model.Record, 0, len(m.mergeOps))
+	for _, rec := range m.mergeOps {
+		if rec.Kind != model.RecordKindMergeOperand {
+			continue
+		}
+		if rec.Key != key || rec.Structure != structure {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
 func (m *BTreeMemtable) Delete(r model.Record) {
+	r.Kind = model.RecordKindKV
+	r.Structure = model.StructureTypeNone
+	r.Op = model.MergeOpNone
 	r.Tombstone = true
 	r.Value = nil
 	m.Put(r)
@@ -81,9 +116,12 @@ func (m *BTreeMemtable) IsFull() bool {
 func (m *BTreeMemtable) DrainSorted() []model.Record {
 	out := make([]model.Record, 0, m.entriesNum)
 	m.inOrder(m.root, &out)
+	out = append(out, m.mergeOps...)
+	sortRecordsForFlush(out)
 
 	// reset
 	m.root = &btreeNode{leaf: true}
+	m.mergeOps = nil
 	m.entriesNum = 0
 	m.currentBytes = 0
 	return out
