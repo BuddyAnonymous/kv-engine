@@ -30,8 +30,8 @@ func (m *Manager) WriteMultiFile(path string, records []model.Record) error {
 	dataPath := path + ".data"
 	indexPath := path + ".index"
 	summPath := path + ".summary"
+	filterPath := path + ".filter"
 	// merklePath := path + ".merkle"
-	// bloomFilterPath := path + ".bloom"
 
 	// napiši .data i skupljaj blockFirstKey za svaki data blok
 	dataFirstKeys, err := m.writeDataFile(dataPath, records)
@@ -48,6 +48,10 @@ func (m *Manager) WriteMultiFile(path string, records []model.Record) error {
 
 	// napiši .summary: stride, min/max key, i (svaki stride-ti index entry key -> indexBlockNum)
 	if err := m.writeSummaryFile(summPath, indexEntryLoc, dataFirstKeys, records[len(records)-1].Key); err != nil {
+		return err
+	}
+
+	if err := m.writeFilterFile(filterPath, records); err != nil {
 		return err
 	}
 
