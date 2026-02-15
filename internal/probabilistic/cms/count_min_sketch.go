@@ -82,7 +82,7 @@ func (cms *CountMinSketch) Serialize() []byte {
 	return buf.Bytes()
 }
 
-func DeserializeCMS(data []byte) (*CountMinSketch, error) {
+func Deserialize(data []byte) (*CountMinSketch, error) {
 	buf := bytes.NewReader(data)
 
 	var m, k uint64

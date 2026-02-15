@@ -1,4 +1,4 @@
-package blooms
+package bloom
 
 import "math"
 

@@ -4,28 +4,40 @@ import (
 	"encoding/binary"
 	"errors"
 	"sync"
-
-	"kv-engine/internal/probabilistic/blooms"
 )
 
 var (
 	ErrInvalidBloomData = errors.New("invalid bloom filter data")
+	ErrInvalidBloomMeta = errors.New("invalid bloom meta")
 )
 
 type BloomFilter struct {
-	m      uint                  // broj bitova
-	k      uint                  // broj hash funkcija
-	seed   uint32                // seed za hash funkcije
-	bitset []byte                // bitset
-	hashes []blooms.HashWithSeed // hash funkcije
-	mutex  sync.RWMutex          // thread safety
+	m      uint           // broj bitova
+	k      uint           // broj hash funkcija
+	seed   uint32         // seed za hash funkcije
+	bitset []byte         // bitset
+	hashes []HashWithSeed // hash funkcije
+	mutex  sync.RWMutex   // thread safety
 }
 
 // Konstruktor
 func NewBloomFilter(expectedElements int, falsePositiveRate float64) *BloomFilter {
-	m := blooms.CalculateM(expectedElements, falsePositiveRate)
-	k := blooms.CalculateK(expectedElements, m)
-	hashes, seed := blooms.CreateHashFunctions(uint32(k))
+	m := CalculateM(expectedElements, falsePositiveRate)
+	k := CalculateK(expectedElements, m)
+	hashes, seed := CreateHashFunctions(uint32(k))
+
+	return &BloomFilter{
+		m:      m,
+		k:      k,
+		seed:   seed,
+		bitset: make([]byte, (m+7)/8),
+		hashes: hashes,
+	}
+}
+
+// Kreiranje iz meta bloka
+func NewFromMeta(m uint, k uint, seed uint32) *BloomFilter {
+	hashes := CreateHashFunctionsWithSeed(uint32(k), seed)
 
 	return &BloomFilter{
 		m:      m,
@@ -99,7 +111,7 @@ func (bf *BloomFilter) Serialize() ([]byte, error) {
 	return buf, nil
 }
 
-// Deserialize BloomFiltera kreira Bloom filter iz bajtova
+// Deserialize BloomFiltera kreira Bloom filter iz bajtova (gore navedeni format)
 func Deserialize(data []byte) (*BloomFilter, error) {
 	if len(data) < 12 {
 		return nil, ErrInvalidBloomData
@@ -126,6 +138,50 @@ func Deserialize(data []byte) (*BloomFilter, error) {
 		k:      k,
 		seed:   seed,
 		bitset: bitset,
-		hashes: blooms.CreateHashFunctionsWithSeed(uint32(k), seed),
+		hashes: CreateHashFunctionsWithSeed(uint32(k), seed),
 	}, nil
+}
+
+// Merge dva blooma (kompakcija)
+func (bf *BloomFilter) Merge(other *BloomFilter) error {
+	if bf.m != other.m || bf.k != other.k || bf.seed != other.seed {
+		return ErrInvalidBloomMeta
+	}
+
+	bf.mutex.Lock()
+	defer bf.mutex.Unlock()
+
+	other.mutex.RLock()
+	defer other.mutex.RUnlock()
+
+	for i := range bf.bitset {
+		bf.bitset[i] |= other.bitset[i]
+	}
+	return nil
+}
+
+// -------- META BLOK --------
+
+func (bf *BloomFilter) SerializeMeta() []byte {
+	buf := make([]byte, 12)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(bf.m))
+	binary.BigEndian.PutUint32(buf[4:8], uint32(bf.k))
+	binary.BigEndian.PutUint32(buf[8:12], bf.seed)
+	return buf
+}
+
+func DeserializeMeta(data []byte) (*BloomFilter, error) {
+	if len(data) != 12 {
+		return nil, ErrInvalidBloomMeta
+	}
+
+	m := uint(binary.BigEndian.Uint32(data[0:4]))
+	k := uint(binary.BigEndian.Uint32(data[4:8]))
+	seed := binary.BigEndian.Uint32(data[8:12])
+
+	if m == 0 || k == 0 {
+		return nil, ErrInvalidBloomMeta
+	}
+
+	return NewFromMeta(m, k, seed), nil
 }
