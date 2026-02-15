@@ -1,11 +1,38 @@
 package model
 
+type RecordKind uint8
+
+const (
+	RecordKindKV RecordKind = iota
+	RecordKindMergeOperand
+)
+
+type StructureType uint8
+
+const (
+	StructureTypeNone StructureType = iota
+	StructureTypeBloomFilter
+	StructureTypeCountMinSketch
+	StructureTypeHyperLogLog
+)
+
+type MergeOpType uint8
+
+const (
+	MergeOpNone MergeOpType = iota
+	MergeOpAdd
+	MergeOpRemove
+)
+
 type Record struct {
 	Key       string
 	Value     []byte
 	Tombstone bool
 	Seq       uint64
 	ExpiresAt uint64
+	Kind      RecordKind
+	Structure StructureType
+	Op        MergeOpType
 }
 
 type GetResult struct {
@@ -15,6 +42,9 @@ type GetResult struct {
 	Tombstone bool
 	Seq       uint64
 	ExpiresAt uint64
+	Kind      RecordKind
+	Structure StructureType
+	Op        MergeOpType
 }
 
 type IndexEntry struct {
