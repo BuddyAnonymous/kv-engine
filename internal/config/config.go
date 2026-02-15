@@ -18,6 +18,16 @@ type Config struct {
 	MemtableInstances    int    `json:"memtable_instances"`
 	CacheSize            int    `json:"cache_size"`
 	SummaryStride        uint   `json:"summary_stride"`
+
+	// Probabilistic structure defaults (used on CREATE commands)
+	BFExpectedElements  uint64  `json:"bf_expected_elements"`
+	BFFalsePositiveRate float64 `json:"bf_false_positive_rate"`
+	BFSeed              uint32  `json:"bf_seed"`
+	CMSEpsilon          float64 `json:"cms_epsilon"`
+	CMSDelta            float64 `json:"cms_delta"`
+	CMSSeed             uint32  `json:"cms_seed"`
+	HLLPrecision        uint8   `json:"hll_precision"`
+	HLLSeed             uint32  `json:"hll_seed"`
 }
 
 func Default() Config {
@@ -33,6 +43,14 @@ func Default() Config {
 		MemtableInstances:    1,
 		CacheSize:            8192,
 		SummaryStride:        4,
+		BFExpectedElements:   10000,
+		BFFalsePositiveRate:  0.01,
+		BFSeed:               0,
+		CMSEpsilon:           0.001,
+		CMSDelta:             0.01,
+		CMSSeed:              0,
+		HLLPrecision:         14,
+		HLLSeed:              0,
 	}
 }
 
@@ -95,6 +113,27 @@ func (c *Config) Normalize() {
 	// SummaryStride: mora biti >= 1
 	if c.SummaryStride < 1 {
 		c.SummaryStride = d.SummaryStride
+	}
+
+	// BF params
+	if c.BFExpectedElements == 0 {
+		c.BFExpectedElements = d.BFExpectedElements
+	}
+	if c.BFFalsePositiveRate <= 0 || c.BFFalsePositiveRate >= 1 {
+		c.BFFalsePositiveRate = d.BFFalsePositiveRate
+	}
+
+	// CMS params
+	if c.CMSEpsilon <= 0 || c.CMSEpsilon >= 1 {
+		c.CMSEpsilon = d.CMSEpsilon
+	}
+	if c.CMSDelta <= 0 || c.CMSDelta >= 1 {
+		c.CMSDelta = d.CMSDelta
+	}
+
+	// HLL precision: practical range [4,18]
+	if c.HLLPrecision < 4 || c.HLLPrecision > 18 {
+		c.HLLPrecision = d.HLLPrecision
 	}
 }
 

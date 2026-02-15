@@ -112,7 +112,7 @@ func (m *Manager) GetMergeOperands(structure model.StructureType, key string) ([
 			if rec.Structure != structure {
 				continue
 			}
-			if rec.Op != model.MergeOpAdd && rec.Op != model.MergeOpRemove {
+			if rec.Op != model.MergeOpAdd {
 				continue
 			}
 			if isExpired(rec, now) {

@@ -30,11 +30,14 @@ Formats:
   PUT(key,value)
   PUT(key,"value with spaces")
   PUT(key,value,10s)   // TTL optional: 10s / 5m / 2h
-  BF_ADD(key,value) / BF_REMOVE(key,value)
+  BF_CREATE(key) / BF_DELETE(key)
+  BF_ADD(key,value)
   BF_GET(key,value)
-  CMS_ADD(key,value) / CMS_REMOVE(key,value)
+  CMS_CREATE(key) / CMS_DELETE(key)
+  CMS_ADD(key,value)
   CMS_GET(key,value)
-  HLL_ADD(key,value) / HLL_REMOVE(key,value)
+  HLL_CREATE(key) / HLL_DELETE(key)
+  HLL_ADD(key,value)
   HLL_GET(key)
   // All above also support optional ttl: CMD(key,value,10s)
   GET(key)
@@ -124,8 +127,23 @@ Formats:
 			}
 			fmt.Println("OK")
 
-		case "BF_REMOVE":
-			if err := runBinaryWriteCommand(args, "BF_REMOVE", eng.BFRemove); err != nil {
+		case "BF_CREATE":
+			if len(args) != 1 {
+				fmt.Println("usage: BF_CREATE(key)")
+				continue
+			}
+			if err := eng.BFCreate(args[0]); err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println("OK")
+
+		case "BF_DELETE":
+			if len(args) != 1 {
+				fmt.Println("usage: BF_DELETE(key)")
+				continue
+			}
+			if err := eng.BFDelete(args[0]); err != nil {
 				fmt.Println("error:", err)
 				continue
 			}
@@ -138,8 +156,23 @@ Formats:
 			}
 			fmt.Println("OK")
 
-		case "CMS_REMOVE":
-			if err := runBinaryWriteCommand(args, "CMS_REMOVE", eng.CMSRemove); err != nil {
+		case "CMS_CREATE":
+			if len(args) != 1 {
+				fmt.Println("usage: CMS_CREATE(key)")
+				continue
+			}
+			if err := eng.CMSCreate(args[0]); err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println("OK")
+
+		case "CMS_DELETE":
+			if len(args) != 1 {
+				fmt.Println("usage: CMS_DELETE(key)")
+				continue
+			}
+			if err := eng.CMSDelete(args[0]); err != nil {
 				fmt.Println("error:", err)
 				continue
 			}
@@ -152,8 +185,23 @@ Formats:
 			}
 			fmt.Println("OK")
 
-		case "HLL_REMOVE":
-			if err := runBinaryWriteCommand(args, "HLL_REMOVE", eng.HLLRemove); err != nil {
+		case "HLL_CREATE":
+			if len(args) != 1 {
+				fmt.Println("usage: HLL_CREATE(key)")
+				continue
+			}
+			if err := eng.HLLCreate(args[0]); err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println("OK")
+
+		case "HLL_DELETE":
+			if len(args) != 1 {
+				fmt.Println("usage: HLL_DELETE(key)")
+				continue
+			}
+			if err := eng.HLLDelete(args[0]); err != nil {
 				fmt.Println("error:", err)
 				continue
 			}
