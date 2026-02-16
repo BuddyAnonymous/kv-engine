@@ -2,6 +2,8 @@ package memtable
 
 import (
 	"fmt"
+	"sort"
+	"time"
 
 	"kv-engine/internal/model"
 )
@@ -75,6 +77,97 @@ func (m *MemtableManager) GetMergeOperands(structure model.StructureType, key st
 		out = append(out, m.tables[idx].GetMergeOperands(structure, key)...)
 	}
 	return out
+}
+
+func (m *MemtableManager) ListLiveKeysInRange(startKey, endKey string) ([]string, error) {
+	if startKey == "" || endKey == "" {
+		return nil, fmt.Errorf("range keys must not be empty")
+	}
+	if startKey > endKey {
+		return nil, fmt.Errorf("invalid range: start key must be <= end key")
+	}
+
+	type keyState struct {
+		seq       uint64
+		tombstone bool
+		expired   bool
+	}
+
+	now := uint64(time.Now().Unix())
+	stateByKey := make(map[string]keyState)
+
+	process := func(recs []model.Record) {
+		for _, rec := range recs {
+			if rec.Kind != model.RecordKindKV {
+				continue
+			}
+			if rec.Key < startKey || rec.Key > endKey {
+				continue
+			}
+			cur, ok := stateByKey[rec.Key]
+			if ok && cur.seq >= rec.Seq {
+				continue
+			}
+			stateByKey[rec.Key] = keyState{
+				seq:       rec.Seq,
+				tombstone: rec.Tombstone,
+				expired:   rec.ExpiresAt > 0 && rec.ExpiresAt <= now,
+			}
+		}
+	}
+
+	if m.used[m.active] && m.tables[m.active] != nil {
+		process(m.tables[m.active].RecordsSorted())
+	}
+	for i := len(m.roQueue) - 1; i >= 0; i-- {
+		idx := m.roQueue[i]
+		if !m.used[idx] || m.tables[idx] == nil {
+			continue
+		}
+		process(m.tables[idx].RecordsSorted())
+	}
+
+	keys := make([]string, 0, len(stateByKey))
+	for key, st := range stateByKey {
+		if st.tombstone || st.expired {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+func (m *MemtableManager) ApplyBatchAtomically(records []model.Record) error {
+	if len(records) == 0 {
+		return nil
+	}
+
+	clone, err := m.deepClone()
+	if err != nil {
+		return err
+	}
+
+	for _, rec := range records {
+		var (
+			flushNeeded bool
+			opErr       error
+		)
+		if rec.Kind == model.RecordKindKV && rec.Tombstone {
+			flushNeeded, opErr = clone.Delete(rec)
+		} else {
+			flushNeeded, opErr = clone.Put(rec)
+		}
+		if opErr != nil {
+			return opErr
+		}
+		if flushNeeded {
+			return fmt.Errorf("batch exceeds memtable transactional capacity")
+		}
+	}
+
+	*m = *clone
+	return nil
 }
 
 // Put/Delete vracaju flushNeeded=true kad je active postala puna i nema slobodnog slota (tj. popunili smo svih N).
@@ -157,6 +250,32 @@ func (m *MemtableManager) NextFlushBatch() ([]model.Record, bool) {
 	}
 
 	return recs, true
+}
+
+func (m *MemtableManager) deepClone() (*MemtableManager, error) {
+	clone := &MemtableManager{
+		tables:       make([]Memtable, len(m.tables)),
+		used:         make([]bool, len(m.used)),
+		activeFrozen: m.activeFrozen,
+		active:       m.active,
+		roQueue:      append([]int(nil), m.roQueue...),
+		factory:      m.factory,
+	}
+	copy(clone.used, m.used)
+
+	for i := range m.tables {
+		if !m.used[i] {
+			continue
+		}
+		if m.tables[i] == nil {
+			return nil, fmt.Errorf("memtable slot %d is marked used but table is nil", i)
+		}
+		clone.tables[i] = m.tables[i].Clone()
+		if clone.tables[i] == nil {
+			return nil, fmt.Errorf("clone for memtable slot %d returned nil", i)
+		}
+	}
+	return clone, nil
 }
 
 var _ MemtableManagerIface = (*MemtableManager)(nil)

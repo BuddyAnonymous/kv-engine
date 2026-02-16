@@ -158,7 +158,15 @@ func (m *SkipListMemtable) IsFull() bool {
 	return m.entriesNum >= m.maxEntries || m.currentBytes >= m.maxBytes
 }
 
-func (m *SkipListMemtable) DrainSorted() []model.Record {
+func (m *SkipListMemtable) Clone() Memtable {
+	cloned := NewSkipListMemtable(m.maxEntries, m.maxBytes).(*SkipListMemtable)
+	for _, rec := range m.RecordsSorted() {
+		cloned.Put(cloneRecord(rec))
+	}
+	return cloned
+}
+
+func (m *SkipListMemtable) RecordsSorted() []model.Record {
 	out := make([]model.Record, 0, m.entriesNum)
 
 	for x := m.head.forward[0]; x != nil; x = x.forward[0] {
@@ -166,6 +174,11 @@ func (m *SkipListMemtable) DrainSorted() []model.Record {
 	}
 	out = append(out, m.mergeOps...)
 	sortRecordsForFlush(out)
+	return out
+}
+
+func (m *SkipListMemtable) DrainSorted() []model.Record {
+	out := m.RecordsSorted()
 
 	// reset
 	m.head = &skipNode{forward: make([]*skipNode, m.maxLevel)}

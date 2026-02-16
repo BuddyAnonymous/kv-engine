@@ -30,6 +30,8 @@ Formats:
   PUT(key,value)
   PUT(key,"value with spaces")
   PUT(key,value,10s)   // TTL optional: 10s / 5m / 2h
+  BATCH_WRITE(k1,v1,k2,v2,...)
+  BATCH_WRITE(k1,v1,k2,v2,...,10s) // optional shared TTL
   BF_CREATE(key) / BF_DELETE(key)
   BF_ADD(key,value)
   BF_GET(key,value)
@@ -42,6 +44,7 @@ Formats:
   // All above also support optional ttl: CMD(key,value,10s)
   GET(key)
   DELETE(key)
+  DELETE_RANGE(startKey,endKey)
   MERKLE_VALIDATE(sstable_name)
   EXIT
 `)
@@ -91,6 +94,29 @@ Formats:
 				continue
 			}
 			if err := eng.Delete(args[0]); err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println("OK")
+
+		case "BATCH_WRITE":
+			pairs, ttl, err := parseBatchWriteArgs(args)
+			if err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			if err := eng.BatchWrite(pairs, ttl...); err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println("OK")
+
+		case "DELETE_RANGE":
+			if len(args) != 2 {
+				fmt.Println("usage: DELETE_RANGE(startKey,endKey)")
+				continue
+			}
+			if err := eng.DeleteRange(args[0], args[1]); err != nil {
 				fmt.Println("error:", err)
 				continue
 			}
@@ -269,4 +295,37 @@ func runBinaryWriteCommand(args []string, name string, fn func(string, []byte, .
 		return fmt.Errorf("invalid TTL, use 10s, 5m, 2h")
 	}
 	return fn(key, value, dur)
+}
+
+func parseBatchWriteArgs(args []string) ([]engine.KVPair, []time.Duration, error) {
+	if len(args) < 2 {
+		return nil, nil, fmt.Errorf("usage:\n  BATCH_WRITE(k1,v1,k2,v2,...)\n  BATCH_WRITE(k1,v1,k2,v2,...,ttl)")
+	}
+
+	var (
+		durations []time.Duration
+		end       = len(args)
+	)
+
+	if len(args)%2 == 1 {
+		dur, err := time.ParseDuration(args[len(args)-1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid TTL, use 10s, 5m, 2h")
+		}
+		durations = []time.Duration{dur}
+		end = len(args) - 1
+	}
+
+	if end == 0 || end%2 != 0 {
+		return nil, nil, fmt.Errorf("batch must contain key/value pairs")
+	}
+
+	pairs := make([]engine.KVPair, 0, end/2)
+	for i := 0; i < end; i += 2 {
+		pairs = append(pairs, engine.KVPair{
+			Key:   args[i],
+			Value: []byte(args[i+1]),
+		})
+	}
+	return pairs, durations, nil
 }

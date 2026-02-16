@@ -113,11 +113,24 @@ func (m *BTreeMemtable) IsFull() bool {
 	return m.entriesNum >= m.maxEntries || m.currentBytes >= m.maxBytes
 }
 
-func (m *BTreeMemtable) DrainSorted() []model.Record {
+func (m *BTreeMemtable) Clone() Memtable {
+	cloned := NewBTreeMemtable(m.maxEntries, m.maxBytes, m.t).(*BTreeMemtable)
+	for _, rec := range m.RecordsSorted() {
+		cloned.Put(cloneRecord(rec))
+	}
+	return cloned
+}
+
+func (m *BTreeMemtable) RecordsSorted() []model.Record {
 	out := make([]model.Record, 0, m.entriesNum)
 	m.inOrder(m.root, &out)
 	out = append(out, m.mergeOps...)
 	sortRecordsForFlush(out)
+	return out
+}
+
+func (m *BTreeMemtable) DrainSorted() []model.Record {
+	out := m.RecordsSorted()
 
 	// reset
 	m.root = &btreeNode{leaf: true}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"kv-engine/internal/block"
@@ -27,6 +28,11 @@ type Engine struct {
 	mem memtable.MemtableManagerIface
 	sst sstable.ManagerIface
 	seq uint64
+}
+
+type KVPair struct {
+	Key   string
+	Value []byte
 }
 
 func New(cfg config.Config) (*Engine, error) {
@@ -92,6 +98,37 @@ func (e *Engine) Put(key string, value []byte, ttl ...time.Duration) error {
 	}
 
 	return e.ApplyRecord(rec, false)
+}
+
+func (e *Engine) BatchWrite(pairs []KVPair, ttl ...time.Duration) error {
+	if len(pairs) == 0 {
+		return fmt.Errorf("batch is empty")
+	}
+
+	var expiresAt uint64
+	if len(ttl) > 0 {
+		expiresAt = uint64(time.Now().Add(ttl[0]).Unix())
+	}
+
+	records := make([]model.Record, 0, len(pairs))
+	for _, p := range pairs {
+		if strings.TrimSpace(p.Key) == "" {
+			return fmt.Errorf("batch contains empty key")
+		}
+		e.seq++
+		records = append(records, model.Record{
+			Key:       p.Key,
+			Value:     p.Value,
+			Tombstone: false,
+			Seq:       e.seq,
+			ExpiresAt: expiresAt,
+			Kind:      model.RecordKindKV,
+			Structure: model.StructureTypeNone,
+			Op:        model.MergeOpNone,
+		})
+	}
+
+	return e.applyBatchRecords(records)
 }
 
 func (e *Engine) Merge(structure model.StructureType, key string, value []byte, op model.MergeOpType, ttl ...time.Duration) error {
@@ -305,6 +342,59 @@ func (e *Engine) Delete(key string) error {
 	return e.ApplyRecord(rec, false)
 }
 
+func (e *Engine) DeleteRange(startKey, endKey string) error {
+	startKey = strings.TrimSpace(startKey)
+	endKey = strings.TrimSpace(endKey)
+	if startKey == "" || endKey == "" {
+		return fmt.Errorf("range keys must not be empty")
+	}
+	if startKey > endKey {
+		return fmt.Errorf("invalid range: start key must be <= end key")
+	}
+
+	memKeys, err := e.mem.ListLiveKeysInRange(startKey, endKey)
+	if err != nil {
+		return err
+	}
+	sstKeys, err := e.sst.ListLiveKeysInRange(startKey, endKey)
+	if err != nil {
+		return err
+	}
+
+	keySet := make(map[string]struct{}, len(memKeys)+len(sstKeys))
+	for _, k := range memKeys {
+		keySet[k] = struct{}{}
+	}
+	for _, k := range sstKeys {
+		keySet[k] = struct{}{}
+	}
+	if len(keySet) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(keySet))
+	for k := range keySet {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	records := make([]model.Record, 0, len(keys))
+	for _, key := range keys {
+		e.seq++
+		records = append(records, model.Record{
+			Key:       key,
+			Value:     nil,
+			Tombstone: true,
+			Seq:       e.seq,
+			ExpiresAt: 0,
+			Kind:      model.RecordKindKV,
+			Structure: model.StructureTypeNone,
+			Op:        model.MergeOpNone,
+		})
+	}
+	return e.applyBatchRecords(records)
+}
+
 func (e *Engine) Get(key string) ([]byte, bool, error) {
 	now := uint64(time.Now().Unix())
 
@@ -423,4 +513,29 @@ func (e *Engine) ApplyRecord(rec model.Record, fromWAL bool) error {
 		return e.flushMemtable()
 	}
 	return nil
+}
+
+func (e *Engine) applyBatchRecords(records []model.Record) error {
+	if len(records) == 0 {
+		return nil
+	}
+
+	// WAL transactional envelope: BEGIN + records + COMMIT.
+	if err := e.wal.AppendBatchBegin(); err != nil {
+		return err
+	}
+	for _, rec := range records {
+		if err := e.wal.Append(rec); err != nil {
+			return err
+		}
+	}
+	if err := e.wal.AppendBatchCommit(); err != nil {
+		return err
+	}
+	// COMMIT must be durable before batch becomes visible in memtables.
+	if err := e.wal.Sync(); err != nil {
+		return err
+	}
+
+	return e.mem.ApplyBatchAtomically(records)
 }
