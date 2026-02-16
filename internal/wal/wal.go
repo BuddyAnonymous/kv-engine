@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"encoding/binary"
 	"fmt"
 	"hash/crc32"
 	"kv-engine/internal/block"
@@ -23,8 +24,33 @@ type WALManager struct {
 	CurrentSegment   *WALSegment
 	SegmentID        int
 	FirstSegmentID   int
+	PersistedSeq     uint64
 	bm               *block.BlockManager
 	applier          RecordApplier
+}
+
+const walMetaFile = "wal_meta.dat"
+
+// readPersistedSeq cita persistedSeq iz meta fajla pomocu BlockManager-a.
+// Vraca 0 ako fajl ne postoji (seq krece od 1, pa 0 znaci "nista nije perzistirano").
+func readPersistedSeq(bm *block.BlockManager, dirpath string) (uint64, error) {
+	path := filepath.Join(dirpath, walMetaFile)
+	data, err := bm.ReadAt(path, 0, 8)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return binary.LittleEndian.Uint64(data[:8]), nil
+}
+
+// writePersistedSeq upisuje persistedSeq u meta fajl pomocu BlockManager-a.
+func writePersistedSeq(bm *block.BlockManager, dirpath string, seq uint64, blockSize int) error {
+	path := filepath.Join(dirpath, walMetaFile)
+	data := make([]byte, blockSize)
+	binary.LittleEndian.PutUint64(data[:8], seq)
+	return bm.WriteBlock(path, 0, data, blockSize)
 }
 
 func NewWALManager(dirpath string, configMaxSegmentBlocks int, configBlockSize int, bm *block.BlockManager, applier RecordApplier) (*WALManager, error, uint64) {
@@ -45,12 +71,31 @@ func NewWALManager(dirpath string, configMaxSegmentBlocks int, configBlockSize i
 		bm:               bm,
 		applier:          applier,
 	}
+
+	// Procitaj persistedSeq iz meta fajla
+	persistedSeq, err := readPersistedSeq(bm, dirpath)
+	if err != nil {
+		return nil, err, 0
+	}
+	manager.PersistedSeq = persistedSeq
+
 	// SCENARIO 1: WAL NE POSTOJI
-	if len(files) == 0 {
+	// Filtriramo fajlove — ignorisemo direktorijume, non-WAL fajlove i meta fajl
+	var walFiles []os.DirEntry
+	for _, f := range files {
+		if f.IsDir() {
+			continue
+		}
+		if parseSegmentID(f.Name()) >= 0 {
+			walFiles = append(walFiles, f)
+		}
+	}
+	if len(walFiles) == 0 {
 		manager.SegmentID = 0
 		if err := manager.rotateSegment(bm); err != nil {
 			return nil, err, 0
 		}
+		manager.FirstSegmentID = manager.SegmentID
 		return manager, nil, 0
 	}
 
@@ -59,10 +104,7 @@ func NewWALManager(dirpath string, configMaxSegmentBlocks int, configBlockSize i
 	lastID := -1
 	var lastSegmentPath string
 
-	for _, f := range files {
-		if f.IsDir() {
-			continue
-		}
+	for _, f := range walFiles {
 		id := parseSegmentID(f.Name())
 		if id < 0 {
 			continue
@@ -83,35 +125,25 @@ func NewWALManager(dirpath string, configMaxSegmentBlocks int, configBlockSize i
 	manager.SegmentID = lastID
 	manager.FirstSegmentID = firstID
 
-	// Otvori poslednji segment
-	file, err := os.OpenFile(lastSegmentPath, os.O_RDWR, 0644)
-	if err != nil {
-		return nil, err, 0
-	}
-
 	// Procitaj header poslednjeg segmenta
 	headerBytes, err := bm.ReadAt(lastSegmentPath, 0, WALSegmentHeaderSize)
 	if err != nil {
-		file.Close()
 		return nil, err, 0
 	}
 
 	header, err := DeserializeWALSegmentHeader(headerBytes)
 	if err != nil {
-		file.Close()
 		return nil, err, 0
 	}
 
 	// Reprodukcija WAL-a od prvog do poslednjeg segmenta, i pronalazak trenutne pozicije u poslednjem segmentu
-	currentBlock, currentOffset, err, lastSeq := ReplayWAL(firstID, lastID, dirpath, bm, applier)
+	currentBlock, currentOffset, err, lastSeq := ReplayWAL(firstID, lastID, dirpath, bm, applier, persistedSeq)
 	if err != nil {
-		file.Close()
 		return nil, err, 0
 	}
 	// Kreiranje novog segmenta ako je poslednji segment pun
 	if currentBlock == 0 && currentOffset == 0 {
 		// Poslednji segment je pun, treba napraviti novi segment, i treba azurirati sve podatke
-		file.Close()
 		if err := manager.rotateSegment(bm); err != nil {
 			return nil, err, 0
 		}
@@ -119,18 +151,15 @@ func NewWALManager(dirpath string, configMaxSegmentBlocks int, configBlockSize i
 	}
 
 	if currentOffset < 0 || currentOffset > int(header.BlockSize) {
-		file.Close()
 		return nil, fmt.Errorf("invalid WAL replay offset %d for block size %d", currentOffset, header.BlockSize), 0
 	}
 	if currentBlock < 0 || currentBlock > int(header.SegmentBlocks) {
-		file.Close()
 		return nil, fmt.Errorf("invalid WAL replay block index %d for segment blocks %d", currentBlock, header.SegmentBlocks), 0
 	}
 
 	remainingInBlock := int(header.BlockSize) - currentOffset
 
 	manager.CurrentSegment = &WALSegment{
-		File:             file,
 		FilePath:         lastSegmentPath,
 		Header:           header,
 		CurrentBlock:     currentBlock,
@@ -140,7 +169,7 @@ func NewWALManager(dirpath string, configMaxSegmentBlocks int, configBlockSize i
 	return manager, nil, lastSeq
 }
 
-func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, applier RecordApplier) (int, int, error, uint64) {
+func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, applier RecordApplier, persistedSeq uint64) (int, int, error, uint64) {
 	var completeData []byte
 	lastSeq := uint64(0)
 	for i := firstID; i <= lastID; i++ {
@@ -157,9 +186,6 @@ func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, 
 		}
 		blockSize := int(header.BlockSize)
 		segmentBlocks := int(header.SegmentBlocks)
-		if header.Magic != [4]byte{'W', 'A', 'L', 'S'} {
-			return -1, -1, fmt.Errorf("invalid WAL segment magic in segment %d", i), 0
-		}
 		var crc32Val uint32
 		var fragType FragmentType
 		var dataLen uint32
@@ -205,6 +231,17 @@ func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, 
 				}
 				return j, offset, nil, lastSeq
 			}
+			if fragType == FragmentPadding {
+				offset = 0
+				j++
+				if j != segmentBlocks {
+					blockData, err = bm.ReadBlock(segmentPath, uint64(j), blockSize)
+					if err != nil {
+						return -1, -1, err, 0
+					}
+				}
+				continue
+			}
 			payloadEnd := offset + WALFragmentHeaderSize + int(dataLen)
 			if payloadEnd > blockSize {
 				return -1, -1, fmt.Errorf("fragment payload out of block bounds in segment %d, block %d", i, j), 0
@@ -217,13 +254,18 @@ func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, 
 			completeData = append(completeData, data...)
 			if (fragType == FragmentFull) || (fragType == FragmentLast) {
 				record, err := DeserializeWALRecord(completeData)
-				lastSeq = record.Seq
 				if err != nil {
 					return -1, -1, err, 0
 				}
+				lastSeq = record.Seq
 
-				modelRecord := record.ToRecord()
-				applier.ApplyRecord(modelRecord, true)
+				// Preskoci zapise koji su vec perzistirani u SSTable
+				if record.Seq > persistedSeq {
+					modelRecord := record.ToRecord()
+					if err := applier.ApplyRecord(modelRecord, true); err != nil {
+						return -1, -1, fmt.Errorf("applier.ApplyRecord failed during replay: %w", err), 0
+					}
+				}
 
 				completeData = nil
 				offset += WALFragmentHeaderSize + int(dataLen)
@@ -269,10 +311,6 @@ func parseSegmentID(filename string) int {
 }
 
 func (m *WALManager) rotateSegment(bm *block.BlockManager) error {
-	if m.CurrentSegment != nil {
-		m.CurrentSegment.File.Close()
-	}
-
 	m.SegmentID++
 
 	filePath := fmt.Sprintf("%s/wal_%d.log", m.DirPath, m.SegmentID)
@@ -301,11 +339,22 @@ func (m *WALManager) Write(seq uint64, expiresAt uint64, opType byte, key []byte
 	dataOffset := 0
 	isFirstFragment := true
 
+	// Azuriraj MaxSeq pre upisa fragmenata (da header bude tacan i pre rotacije)
+	if seq > m.CurrentSegment.Header.MaxSeq {
+		m.CurrentSegment.Header.MaxSeq = seq
+		if err := m.flushSegmentHeader(); err != nil {
+			return err
+		}
+	}
+
 	for dataOffset < len(recordData) {
 		if m.CurrentSegment.RemainingInBlock < WALFragmentHeaderSize+1 {
 			paddingLen := m.CurrentSegment.RemainingInBlock
 			if paddingLen > 0 {
 				padding := make([]byte, paddingLen)
+				if paddingLen >= WALFragmentHeaderSize {
+					padding[4] = byte(FragmentPadding)
+				}
 				if err := m.writeBytesToCurrentBlock(padding); err != nil {
 					return err
 				}
@@ -313,6 +362,13 @@ func (m *WALManager) Write(seq uint64, expiresAt uint64, opType byte, key []byte
 			}
 			if err := m.advanceBlockOrRotate(); err != nil {
 				return err
+			}
+			// Posle rotacije novi segment ima MaxSeq=0, propagiraj seq
+			if seq > m.CurrentSegment.Header.MaxSeq {
+				m.CurrentSegment.Header.MaxSeq = seq
+				if err := m.flushSegmentHeader(); err != nil {
+					return err
+				}
 			}
 			continue
 		}
@@ -358,7 +414,7 @@ func (m *WALManager) Write(seq uint64, expiresAt uint64, opType byte, key []byte
 	return nil
 }
 
-// Append upisuje model.Record u WAL koristeci bitpacked OpType.
+// API funkciija za kreiranje novog WAL zapisa
 func (m *WALManager) Append(rec model.Record) error {
 	var op byte
 	if rec.Tombstone {
@@ -416,5 +472,53 @@ func (m *WALManager) advanceBlockOrRotate() error {
 	}
 
 	m.CurrentSegment.RemainingInBlock = int(m.CurrentSegment.Header.BlockSize)
+	return nil
+}
+
+// flushSegmentHeader upisuje azurirani header (sa MaxSeq) nazad u block 0.
+func (m *WALManager) flushSegmentHeader() error {
+	blockSize := int(m.CurrentSegment.Header.BlockSize)
+	headerData := m.CurrentSegment.Header.Serialize()
+	blockData, err := m.bm.ReadBlock(m.CurrentSegment.FilePath, 0, blockSize)
+	if err != nil {
+		return err
+	}
+	copy(blockData[:len(headerData)], headerData)
+	return m.bm.WriteBlock(m.CurrentSegment.FilePath, 0, blockData, blockSize)
+}
+
+// CheckWAL brise sve perzistirane wal zapise
+func (m *WALManager) CheckWAL(persistedSeq uint64) error {
+	for m.FirstSegmentID < m.SegmentID {
+		segmentPath := fmt.Sprintf("%s/wal_%d.log", m.DirPath, m.FirstSegmentID)
+
+		headerBytes, err := m.bm.ReadAt(segmentPath, 0, WALSegmentHeaderSize)
+		if err != nil {
+			return err
+		}
+
+		header, err := DeserializeWALSegmentHeader(headerBytes)
+		if err != nil {
+			return err
+		}
+
+		if header.MaxSeq > persistedSeq {
+			break
+		}
+
+		// Svi zapisi u ovom segmentu su vec perzistirani — obrisi ga
+		if err := os.Remove(segmentPath); err != nil {
+			return fmt.Errorf("failed to delete WAL segment %s: %w", segmentPath, err)
+		}
+
+		m.FirstSegmentID++
+	}
+
+	// Azuriraj persistedSeq u meta fajlu
+	m.PersistedSeq = persistedSeq
+	if err := writePersistedSeq(m.bm, m.DirPath, persistedSeq, m.BlockSize); err != nil {
+		return fmt.Errorf("failed to write WAL meta: %w", err)
+	}
+
 	return nil
 }

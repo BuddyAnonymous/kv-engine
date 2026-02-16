@@ -91,7 +91,7 @@ func main() {
 		recovered.CurrentSegment.RemainingInBlock,
 	)
 
-	blockIdx, offset, err, _ := wal.ReplayWAL(recovered.FirstSegmentID, recovered.SegmentID, walDir, bm, noopApplier{})
+	blockIdx, offset, err, _ := wal.ReplayWAL(recovered.FirstSegmentID, recovered.SegmentID, walDir, bm, noopApplier{}, 0)
 	if err != nil {
 		log.Fatal("ReplayWAL error:", err)
 	}

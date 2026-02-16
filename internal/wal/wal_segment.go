@@ -5,16 +5,16 @@ import (
 	"encoding/binary"
 	"fmt"
 	"kv-engine/internal/block"
-	"os"
 )
 
 type WALSegmentHeader struct {
 	Magic         [4]byte
 	BlockSize     uint32
 	SegmentBlocks uint32
+	MaxSeq        uint64
 }
 
-const WALSegmentHeaderSize = 4 + 4 + 4 // Magic (4 bytes) + BlockSize (4 bytes) + SegmentBlocks (4 bytes)
+const WALSegmentHeaderSize = 4 + 4 + 4 + 8 // Magic (4) + BlockSize (4) + SegmentBlocks (4) + MaxSeq (8)
 
 func NewWalSegmentHeader(blockSize uint32, SegmentBlocks uint32) *WALSegmentHeader {
 	return &WALSegmentHeader{
@@ -29,6 +29,7 @@ func (h *WALSegmentHeader) Serialize() []byte {
 	binary.Write(buffer, binary.LittleEndian, h.Magic)
 	binary.Write(buffer, binary.LittleEndian, h.BlockSize)
 	binary.Write(buffer, binary.LittleEndian, h.SegmentBlocks)
+	binary.Write(buffer, binary.LittleEndian, h.MaxSeq)
 	return buffer.Bytes()
 }
 
@@ -50,8 +51,10 @@ func DeserializeWALSegmentHeader(data []byte) (*WALSegmentHeader, error) {
 	if err := binary.Read(reader, binary.LittleEndian, &header.SegmentBlocks); err != nil {
 		return nil, err
 	}
+	if err := binary.Read(reader, binary.LittleEndian, &header.MaxSeq); err != nil {
+		return nil, err
+	}
 
-	// Opcionalno: validacija Magic polja
 	if string(header.Magic[:]) != "WALS" {
 		return nil, fmt.Errorf("invalid WAL segment magic: %v", header.Magic)
 	}
@@ -60,7 +63,6 @@ func DeserializeWALSegmentHeader(data []byte) (*WALSegmentHeader, error) {
 }
 
 type WALSegment struct {
-	File             *os.File
 	FilePath         string
 	Header           *WALSegmentHeader
 	CurrentBlock     int
@@ -81,13 +83,7 @@ func NewWALSegment(filePath string, header *WALSegmentHeader, bm *block.BlockMan
 		return nil, err
 	}
 
-	file, err := os.OpenFile(filePath, os.O_RDWR, 0644)
-	if err != nil {
-		return nil, err
-	}
-
 	return &WALSegment{
-		File:             file,
 		FilePath:         filePath,
 		Header:           header,
 		CurrentBlock:     0,
