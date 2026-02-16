@@ -23,7 +23,7 @@ import (
 type Engine struct {
 	cfg config.Config
 	bm  *block.BlockManager
-	wal *wal.WAL
+	wal *wal.WALManager
 	mem memtable.MemtableManagerIface
 	sst sstable.ManagerIface
 	seq uint64
@@ -49,17 +49,20 @@ func New(cfg config.Config) (*Engine, error) {
 	e := &Engine{
 		cfg: cfg,
 		bm:  bm,
-		wal: wal.New(),
 		mem: mem,
 		sst: sstable.New(filepath.Join(cfg.DataDir, "sstable", "level0"), cfg.MultiFileSSTable, bm, cfg.BlockSize, uint64(cfg.SummaryStride)),
 	}
 
-	// TODO: WAL replay -> memtable
-	if err := e.wal.Replay(func(r model.Record) error {
-		return e.ApplyRecord(r, true)
-	}); err != nil {
-		return nil, err
+	// Inicijalizuj WAL sa engine-om kao applier (replay se desava unutar NewWALManager)
+	walManager, walErr, lastSeq := wal.NewWALManager(filepath.Join(cfg.DataDir, "wal"), cfg.SegmentBlocks, cfg.BlockSize, bm, e)
+	if walErr != nil {
+		return nil, walErr
 	}
+	e.wal = walManager
+	if lastSeq > e.seq {
+		e.seq = lastSeq
+	}
+
 	maxProbMetaSeq, err := e.sst.MaxProbMetaSeq()
 	if err != nil {
 		return nil, err
