@@ -53,6 +53,14 @@ func (m *Manager) Get(key string) ([]byte, bool, error) {
 
 	now := uint64(time.Now().Unix())
 	for _, dataPath := range dataFiles {
+		maybeInFilter, err := m.maybeKeyInFilter(dataPath, key)
+		if err != nil {
+			return nil, false, err
+		}
+		if !maybeInFilter {
+			continue
+		}
+
 		rec, found, err := m.getLatestKVFromDataFile(dataPath, key)
 		if err != nil {
 			return nil, false, err

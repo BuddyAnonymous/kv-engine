@@ -21,7 +21,6 @@ type MergeOpType uint8
 const (
 	MergeOpNone MergeOpType = iota
 	MergeOpAdd
-	MergeOpRemove
 )
 
 type ProbMetaAction string
@@ -85,6 +84,15 @@ type SSTFooter struct {
 	FilterLen     uint64
 	MerkleOffset  uint64
 	MerkleLen     uint64
+}
+
+type MerkleValidationResult struct {
+	Valid              bool
+	ChangedLeafIndices []int
+	ExpectedRootHex    string
+	ActualRootHex      string
+	ExpectedLeafCount  int
+	ActualLeafCount    int
 }
 
 type ProbMetaRecord struct {

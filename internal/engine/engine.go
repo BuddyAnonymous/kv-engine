@@ -325,6 +325,10 @@ func (e *Engine) Get(key string) ([]byte, bool, error) {
 	return val, true, nil
 }
 
+func (e *Engine) ValidateMerkle(table string) (model.MerkleValidationResult, error) {
+	return e.sst.ValidateMerkle(table)
+}
+
 func (e *Engine) flushMemtable() error {
 	records, ok := e.mem.NextFlushBatch()
 	if !ok {

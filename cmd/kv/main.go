@@ -42,6 +42,7 @@ Formats:
   // All above also support optional ttl: CMD(key,value,10s)
   GET(key)
   DELETE(key)
+  MERKLE_VALIDATE(sstable_name)
   EXIT
 `)
 
@@ -94,6 +95,23 @@ Formats:
 				continue
 			}
 			fmt.Println("OK")
+
+		case "MERKLE_VALIDATE":
+			if len(args) != 1 {
+				fmt.Println("usage: MERKLE_VALIDATE(sstable_name)")
+				continue
+			}
+			res, err := eng.ValidateMerkle(args[0])
+			if err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			if res.Valid {
+				fmt.Printf("MERKLE OK root=%s leaves=%d\n", res.ActualRootHex, res.ActualLeafCount)
+				continue
+			}
+			fmt.Printf("MERKLE MISMATCH expectedRoot=%s actualRoot=%s expectedLeaves=%d actualLeaves=%d changedLeafIndices=%v\n",
+				res.ExpectedRootHex, res.ActualRootHex, res.ExpectedLeafCount, res.ActualLeafCount, res.ChangedLeafIndices)
 
 		case "PUT":
 			if err := runBinaryWriteCommand(args, "PUT", eng.Put); err != nil {
