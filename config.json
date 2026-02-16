@@ -17,5 +17,11 @@
   "cms_delta": 0.01,
   "cms_seed": 0,
   "hll_precision": 14,
-  "hll_seed": 0
+  "hll_seed": 0,
+  "lsm_max_levels": 4,
+  "lsm_compaction_algorithm": "size_tiered",
+  "lsm_size_tiered_min_sstables": 4,
+  "lsm_leveled_l0_threshold": 4,
+  "lsm_leveled_base_size_mb": 10,
+  "lsm_leveled_multiplier": 10
 }

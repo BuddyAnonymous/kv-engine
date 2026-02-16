@@ -10,6 +10,7 @@ import (
 
 	"kv-engine/internal/block"
 	"kv-engine/internal/config"
+	"kv-engine/internal/lsm"
 	"kv-engine/internal/memtable"
 	"kv-engine/internal/model"
 	"kv-engine/internal/sstable"
@@ -26,6 +27,7 @@ type Engine struct {
 	wal *wal.WALManager
 	mem memtable.MemtableManagerIface
 	sst sstable.ManagerIface
+	lsm *lsm.LSMTree
 	seq uint64
 }
 
@@ -46,11 +48,29 @@ func New(cfg config.Config) (*Engine, error) {
 
 	bm := block.NewBlockManager(cfg.CacheSize)
 
+	sstBaseDir := filepath.Join(cfg.DataDir, "sstable")
+	sstMgr := sstable.New(filepath.Join(sstBaseDir, "level0"), cfg.MultiFileSSTable, bm, cfg.BlockSize, uint64(cfg.SummaryStride))
+
+	lsmCfg := lsm.LSMConfig{
+		MaxLevels:             cfg.LSMMaxLevels,
+		Algorithm:             cfg.LSMCompactionAlgorithm,
+		SizeTieredMinSSTables: cfg.LSMSizeTieredMinSSTables,
+		LeveledL0Threshold:    cfg.LSMLeveledL0Threshold,
+		LeveledBaseSizeMB:     cfg.LSMLeveledBaseSizeMB,
+		LeveledMultiplier:     cfg.LSMLeveledMultiplier,
+	}
+
+	lsmTree, err := lsm.NewLSMTree(lsmCfg, sstMgr, sstBaseDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create lsm tree: %w", err)
+	}
+
 	e := &Engine{
 		cfg: cfg,
 		bm:  bm,
 		mem: mem,
-		sst: sstable.New(filepath.Join(cfg.DataDir, "sstable", "level0"), cfg.MultiFileSSTable, bm, cfg.BlockSize, uint64(cfg.SummaryStride)),
+		sst: sstMgr,
+		lsm: lsmTree,
 	}
 
 	// Inicijalizuj WAL sa engine-om kao applier (replay se desava unutar NewWALManager)
@@ -317,8 +337,8 @@ func (e *Engine) Get(key string) ([]byte, bool, error) {
 		return r.Value, true, nil
 	}
 
-	// 2) SSTable (L0 newest -> oldest)
-	val, found, err := e.sst.Get(key)
+	// 2) SSTable (all levels via LSM tree)
+	val, found, err := e.lsm.Get(key)
 	if err != nil {
 		return nil, false, err
 	}
@@ -337,7 +357,7 @@ func (e *Engine) flushMemtable() error {
 	if !ok {
 		return nil
 	}
-	if err := e.sst.Flush(records); err != nil {
+	if err := e.lsm.Flush(records); err != nil {
 		return err
 	}
 	return nil
@@ -364,7 +384,7 @@ func (e *Engine) getAllMergeOperands(structure model.StructureType, key string) 
 		ops = append(ops, rec)
 	}
 
-	sstOps, err := e.sst.GetMergeOperands(structure, key)
+	sstOps, err := e.lsm.GetMergeOperands(structure, key)
 	if err != nil {
 		return nil, err
 	}
