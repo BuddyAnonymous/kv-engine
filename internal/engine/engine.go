@@ -56,7 +56,7 @@ func New(cfg config.Config) (*Engine, error) {
 
 	// TODO: WAL replay -> memtable
 	if err := e.wal.Replay(func(r model.Record) error {
-		return e.applyRecord(r, true)
+		return e.ApplyRecord(r, true)
 	}); err != nil {
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func (e *Engine) Put(key string, value []byte, ttl ...time.Duration) error {
 		Op:        model.MergeOpNone,
 	}
 
-	return e.applyRecord(rec, false)
+	return e.ApplyRecord(rec, false)
 }
 
 func (e *Engine) Merge(structure model.StructureType, key string, value []byte, op model.MergeOpType, ttl ...time.Duration) error {
@@ -122,7 +122,7 @@ func (e *Engine) Merge(structure model.StructureType, key string, value []byte, 
 		Op:        op,
 	}
 
-	return e.applyRecord(rec, false)
+	return e.ApplyRecord(rec, false)
 }
 
 func (e *Engine) BFAdd(key string, value []byte, ttl ...time.Duration) error {
@@ -299,7 +299,7 @@ func (e *Engine) Delete(key string) error {
 		Op:        model.MergeOpNone,
 	}
 
-	return e.applyRecord(rec, false)
+	return e.ApplyRecord(rec, false)
 }
 
 func (e *Engine) Get(key string) ([]byte, bool, error) {
@@ -393,7 +393,7 @@ func structureName(s model.StructureType) string {
 }
 
 // applyRecord upisuje record u memtable, a u WAL samo ako zapis nije stigao iz replay-a.
-func (e *Engine) applyRecord(rec model.Record, fromWAL bool) error {
+func (e *Engine) ApplyRecord(rec model.Record, fromWAL bool) error {
 	if rec.Seq > e.seq {
 		e.seq = rec.Seq
 	}

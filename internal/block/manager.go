@@ -106,7 +106,7 @@ func (bm *BlockManager) WriteBlock(path string, blockNum uint64, data []byte, bl
 		return err
 	}
 
-	// file.Sync()
+	file.Sync()
 
 	// 3. Upis u cache
 	key := BlockKey{Path: path, BlockNum: blockNum}
