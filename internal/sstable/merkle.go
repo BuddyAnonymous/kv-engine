@@ -29,11 +29,6 @@ func (m *Manager) writeMerkleFile(merklePath string, records []model.Record) err
 	}
 
 	bw := newBlockWriter(m.bm, merklePath, m.blockSize, nil)
-	if bw.onNewBlock != nil {
-		if err := bw.onNewBlock(0, true); err != nil {
-			return err
-		}
-	}
 	chunkSize := bw.payloadCap()
 	for off := 0; off < len(payload); {
 		end := off + chunkSize

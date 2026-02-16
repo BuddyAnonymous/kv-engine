@@ -21,7 +21,6 @@ type MergeOpType uint8
 const (
 	MergeOpNone MergeOpType = iota
 	MergeOpAdd
-	MergeOpRemove
 )
 
 type ProbMetaAction string
