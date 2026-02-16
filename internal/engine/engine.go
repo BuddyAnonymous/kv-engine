@@ -17,6 +17,7 @@ import (
 
 	"kv-engine/internal/probabilistic/bloom"
 	"kv-engine/internal/probabilistic/cms"
+	"kv-engine/internal/probabilistic/hll"
 )
 
 type Engine struct {
@@ -281,15 +282,8 @@ func (e *Engine) HLLGet(key string) (uint64, error) {
 		return 0, err
 	}
 
-	set := make(map[string]struct{}, len(ops))
-	for _, rec := range ops {
-		if rec.Seq <= meta.Seq {
-			continue
-		}
-		v := string(rec.Value)
-		set[v] = struct{}{}
-	}
-	return uint64(len(set)), nil
+	hll := hll.Merge(ops, meta.HLLPrecision, meta.HLLSeed)
+	return uint64(hll.Estimate()), nil
 }
 
 func (e *Engine) Delete(key string) error {
