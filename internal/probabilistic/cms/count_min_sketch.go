@@ -1,18 +1,25 @@
 package cms
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
+	"kv-engine/internal/model"
+)
+
+var (
+	ErrInvalidCMSData = errors.New("invalid Count-Min Sketch data")
+	ErrInvalidCMSMeta = errors.New("invalid Count-Min Sketch meta")
 )
 
 type CountMinSketch struct {
 	m      uint
 	k      uint
+	seed   uint32
 	table  [][]uint64
 	hashes []HashWithSeed
 }
 
+// Konstruktor
 func NewCountMinSketch(epsilon, delta float64) *CountMinSketch {
 	m := CalculateM(epsilon)
 	k := CalculateK(delta)
@@ -22,12 +29,26 @@ func NewCountMinSketch(epsilon, delta float64) *CountMinSketch {
 		table[i] = make([]uint64, m)
 	}
 
-	hashes := CreateHashFunctions(k)
+	hashes, seed := CreateHashFunctions(k)
 
 	return &CountMinSketch{
 		m:      m,
 		k:      k,
+		seed:   seed,
 		table:  table,
+		hashes: hashes,
+	}
+}
+
+// Kreiranje iz meta bloka
+func NewFromMeta(m uint, k uint, seed uint32) *CountMinSketch {
+	hashes := CreateHashFunctionsWithSeed(uint32(k), seed)
+
+	return &CountMinSketch{
+		m:      m,
+		k:      k,
+		seed:   seed,
+		table:  make([][]uint64, k),
 		hashes: hashes,
 	}
 }
@@ -56,8 +77,8 @@ func (cms *CountMinSketch) Estimate(data []byte) uint64 {
 }
 
 func (cms *CountMinSketch) Merge(other *CountMinSketch) error {
-	if cms.m != other.m || cms.k != other.k {
-		return errors.New("CMS parametri se ne poklapaju")
+	if cms.m != other.m || cms.k != other.k || cms.seed != other.seed {
+		return ErrInvalidCMSMeta
 	}
 
 	for i := uint(0); i < cms.k; i++ {
@@ -68,47 +89,75 @@ func (cms *CountMinSketch) Merge(other *CountMinSketch) error {
 	return nil
 }
 
-func (cms *CountMinSketch) Serialize() []byte {
-	buf := new(bytes.Buffer)
+// Format:
+// [0:4] -> m
+// [4:8] -> k
+// [8:12] -> seed
+// [12:]  -> table (k*m uint64 vrednosti)
+func (cms *CountMinSketch) Serialize() ([]byte, error) {
+	buf := make([]byte, 12+len(cms.table)*len(cms.table[0])*8)
 
-	binary.Write(buf, binary.BigEndian, uint64(cms.m))
-	binary.Write(buf, binary.BigEndian, uint64(cms.k))
+	binary.BigEndian.PutUint32(buf[0:4], uint32(cms.m))
+	binary.BigEndian.PutUint32(buf[4:8], uint32(cms.k))
+	binary.BigEndian.PutUint32(buf[8:12], cms.seed)
 
 	for i := uint(0); i < cms.k; i++ {
 		for j := uint(0); j < cms.m; j++ {
-			binary.Write(buf, binary.BigEndian, cms.table[i][j])
+			offset := 12 + int(i*cms.m+j)*8
+			binary.BigEndian.PutUint64(buf[offset:offset+8], cms.table[i][j])
 		}
 	}
-	return buf.Bytes()
+	return buf, nil
 }
 
 func Deserialize(data []byte) (*CountMinSketch, error) {
-	buf := bytes.NewReader(data)
-
-	var m, k uint64
-	if err := binary.Read(buf, binary.BigEndian, &m); err != nil {
-		return nil, err
+	if len(data) < 12 {
+		return nil, ErrInvalidCMSData
 	}
-	if err := binary.Read(buf, binary.BigEndian, &k); err != nil {
-		return nil, err
+
+	m := uint(binary.BigEndian.Uint32(data[0:4]))
+	k := uint(binary.BigEndian.Uint32(data[4:8]))
+	seed := binary.BigEndian.Uint32(data[8:12])
+
+	// Provera dužine
+	expectedLen := 12 + int(k)*int(m)*8
+	if len(data) != expectedLen {
+		return nil, ErrInvalidCMSData
 	}
 
 	table := make([][]uint64, k)
-	for i := uint64(0); i < k; i++ {
+	for i := uint(0); i < k; i++ {
 		table[i] = make([]uint64, m)
-		for j := uint64(0); j < m; j++ {
-			if err := binary.Read(buf, binary.BigEndian, &table[i][j]); err != nil {
-				return nil, err
-			}
+		for j := uint(0); j < m; j++ {
+			offset := 12 + int(i*m+j)*8
+			table[i][j] = binary.BigEndian.Uint64(data[offset : offset+8])
 		}
 	}
 
-	hashes := CreateHashFunctions(uint(k))
-
 	return &CountMinSketch{
-		m:      uint(m),
-		k:      uint(k),
+		m:      m,
+		k:      k,
+		seed:   seed,
 		table:  table,
-		hashes: hashes,
+		hashes: CreateHashFunctionsWithSeed(uint32(k), seed),
 	}, nil
+}
+
+func Merge(ops []model.Record, epsilon float64, delta float64) *CountMinSketch {
+	cms := NewCountMinSketch(epsilon, delta)
+
+	for _, rec := range ops {
+		if rec.Op == model.MergeOpAdd {
+			cms.Add([]byte(rec.Key))
+		}
+	}
+	return cms
+}
+
+func (cms *CountMinSketch) Reset() {
+	for i := range cms.table {
+		for j := range cms.table[i] {
+			cms.table[i][j] = 0
+		}
+	}
 }
