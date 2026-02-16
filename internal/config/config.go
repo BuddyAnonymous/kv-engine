@@ -29,6 +29,14 @@ type Config struct {
 	CMSSeed             uint32  `json:"cms_seed"`
 	HLLPrecision        uint8   `json:"hll_precision"`
 	HLLSeed             uint32  `json:"hll_seed"`
+
+	// LSM Tree params
+	LSMMaxLevels              int    `json:"lsm_max_levels"`
+	LSMCompactionAlgorithm    string `json:"lsm_compaction_algorithm"`
+	LSMSizeTieredMinSSTables  int    `json:"lsm_size_tiered_min_sstables"`
+	LSMLeveledL0Threshold     int    `json:"lsm_leveled_l0_threshold"`
+	LSMLeveledBaseSizeMB      int    `json:"lsm_leveled_base_size_mb"`
+	LSMLeveledMultiplier      int    `json:"lsm_leveled_multiplier"`
 }
 
 func Default() Config {
@@ -53,6 +61,13 @@ func Default() Config {
 		CMSSeed:              0,
 		HLLPrecision:         14,
 		HLLSeed:              0,
+
+		LSMMaxLevels:              4,
+		LSMCompactionAlgorithm:    "size_tiered",
+		LSMSizeTieredMinSSTables:  4,
+		LSMLeveledL0Threshold:     4,
+		LSMLeveledBaseSizeMB:      10,
+		LSMLeveledMultiplier:      10,
 	}
 }
 
@@ -140,6 +155,29 @@ func (c *Config) Normalize() {
 
 	if c.SegmentBlocks <= 0 {
 		c.SegmentBlocks = d.SegmentBlocks
+	}
+
+	// LSM params
+	if c.LSMMaxLevels < 2 {
+		c.LSMMaxLevels = d.LSMMaxLevels
+	}
+	switch c.LSMCompactionAlgorithm {
+	case "size_tiered", "leveled":
+		// ok
+	default:
+		c.LSMCompactionAlgorithm = d.LSMCompactionAlgorithm
+	}
+	if c.LSMSizeTieredMinSSTables < 2 {
+		c.LSMSizeTieredMinSSTables = d.LSMSizeTieredMinSSTables
+	}
+	if c.LSMLeveledL0Threshold < 1 {
+		c.LSMLeveledL0Threshold = d.LSMLeveledL0Threshold
+	}
+	if c.LSMLeveledBaseSizeMB < 1 {
+		c.LSMLeveledBaseSizeMB = d.LSMLeveledBaseSizeMB
+	}
+	if c.LSMLeveledMultiplier < 2 {
+		c.LSMLeveledMultiplier = d.LSMLeveledMultiplier
 	}
 }
 

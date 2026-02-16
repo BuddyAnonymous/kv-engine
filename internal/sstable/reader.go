@@ -946,3 +946,258 @@ func parseSSTTimestamp(fileName string) int64 {
 func isExpired(rec model.Record, now uint64) bool {
 	return rec.ExpiresAt > 0 && rec.ExpiresAt <= now
 }
+
+// ---------- LSM helpers ----------
+
+// ListDataFilesInDir returns .data file paths sorted newest-first from the given directory.
+func (m *Manager) ListDataFilesInDir(dir string) ([]string, error) {
+	pattern := filepath.Join(dir, "sst_*.data")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil, err
+	}
+
+	type candidate struct {
+		path string
+		ts   int64
+		name string
+	}
+	files := make([]candidate, 0, len(matches))
+	for _, dataPath := range matches {
+		base := strings.TrimSuffix(dataPath, ".data")
+		if _, err := os.Stat(base + ".index"); err != nil {
+			continue
+		}
+		if _, err := os.Stat(base + ".summary"); err != nil {
+			continue
+		}
+
+		name := filepath.Base(dataPath)
+		files = append(files, candidate{
+			path: dataPath,
+			ts:   parseSSTTimestamp(name),
+			name: name,
+		})
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].ts != files[j].ts {
+			return files[i].ts > files[j].ts
+		}
+		return files[i].name > files[j].name
+	})
+
+	out := make([]string, 0, len(files))
+	for _, f := range files {
+		out = append(out, f.path)
+	}
+	return out, nil
+}
+
+// GetRecordFromDir searches for a key across all SSTables in the given directory (newest first).
+func (m *Manager) GetRecordFromDir(dir string, key string) ([]byte, bool, error) {
+	dataFiles, err := m.ListDataFilesInDir(dir)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(dataFiles) == 0 {
+		return nil, false, nil
+	}
+
+	now := uint64(time.Now().Unix())
+	for _, dataPath := range dataFiles {
+		maybeInFilter, err := m.maybeKeyInFilter(dataPath, key)
+		if err != nil {
+			return nil, false, err
+		}
+		if !maybeInFilter {
+			continue
+		}
+
+		rec, found, err := m.getLatestKVFromDataFile(dataPath, key)
+		if err != nil {
+			return nil, false, err
+		}
+		if !found {
+			continue
+		}
+		if rec.Tombstone || isExpired(rec, now) {
+			return nil, false, nil
+		}
+		return rec.Value, true, nil
+	}
+
+	return nil, false, nil
+}
+
+// GetMergeOperandsFromDir collects merge operands from all SSTables in the given directory.
+func (m *Manager) GetMergeOperandsFromDir(dir string, structure model.StructureType, key string) ([]model.Record, error) {
+	dataFiles, err := m.ListDataFilesInDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	if len(dataFiles) == 0 {
+		return nil, nil
+	}
+
+	now := uint64(time.Now().Unix())
+	var ops []model.Record
+
+	for _, dataPath := range dataFiles {
+		// Bloom filter check – skip SSTable if key definitely not present.
+		maybeInFilter, err := m.maybeKeyInFilter(dataPath, key)
+		if err != nil {
+			return nil, err
+		}
+		if !maybeInFilter {
+			continue
+		}
+
+		recs, found, err := m.getKeyRecordsFromDataFile(dataPath, key)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue
+		}
+
+		for _, rec := range recs {
+			if rec.Kind != model.RecordKindMergeOperand {
+				continue
+			}
+			if rec.Structure != structure {
+				continue
+			}
+			if rec.Op != model.MergeOpAdd {
+				continue
+			}
+			if isExpired(rec, now) {
+				continue
+			}
+			ops = append(ops, rec)
+		}
+	}
+	return ops, nil
+}
+
+// ReadAllRecordsFromFile reads all records from a .data file in sorted order.
+// This is used during compaction to merge SSTable contents.
+func (m *Manager) ReadAllRecordsFromFile(dataPath string) ([]model.Record, error) {
+	dataHdr, err := m.readFileHeader(dataPath)
+	if err != nil {
+		return nil, err
+	}
+	if dataHdr.magic != m.dataMagic {
+		return nil, fmt.Errorf("invalid data magic in %s", dataPath)
+	}
+
+	blockCount, err := m.countBlocks(dataPath, dataHdr.blockSize)
+	if err != nil {
+		return nil, err
+	}
+
+	prevKey := ""
+	var pending []byte
+	var records []model.Record
+
+	for blockNo := uint64(0); blockNo < blockCount; blockNo++ {
+		payload, err := m.readPayloadBlock(dataPath, dataHdr.blockSize, blockNo)
+		if err != nil {
+			return nil, err
+		}
+
+		off := 0
+		if blockNo == 0 {
+			if len(payload) < 8 {
+				return nil, fmt.Errorf("data header too short in %s", dataPath)
+			}
+			if string(payload[:4]) != string(m.dataMagic[:]) {
+				return nil, fmt.Errorf("invalid data magic in %s", dataPath)
+			}
+			off = 8
+		}
+
+		for off < len(payload) {
+			flags := payload[off]
+			fragType := flags & fragTypeMask
+
+			if len(pending) == 0 {
+				switch fragType {
+				case 0b00:
+					rec, consumed, err := decodeDataRecord(payload[off:], prevKey)
+					if err != nil {
+						return nil, err
+					}
+					off += consumed
+					prevKey = rec.Key
+					records = append(records, rec)
+
+				case 0b10:
+					pending = append(pending, payload[off:]...)
+					off = len(payload)
+
+				case 0b01, 0b11:
+					return nil, fmt.Errorf("unexpected continuation fragment in %s block %d", dataPath, blockNo)
+				}
+				continue
+			}
+
+			if fragType != 0b01 && fragType != 0b11 {
+				return nil, fmt.Errorf("expected continuation fragment in %s block %d", dataPath, blockNo)
+			}
+
+			off++
+			chunkLen, err := readUvarintAt(payload, &off)
+			if err != nil {
+				return nil, err
+			}
+			chunkLenI, err := checkedChunkLen(chunkLen, len(payload)-off, "fragment chunk")
+			if err != nil {
+				return nil, fmt.Errorf("fragment chunk out of bounds in %s block %d", dataPath, blockNo)
+			}
+			pending = append(pending, payload[off:off+chunkLenI]...)
+			off += chunkLenI
+
+			if fragType == 0b01 {
+				rec, consumed, err := decodeDataRecord(pending, prevKey)
+				if err != nil {
+					return nil, err
+				}
+				if consumed != len(pending) {
+					return nil, fmt.Errorf("fragment assembly has extra bytes in %s block %d", dataPath, blockNo)
+				}
+				pending = pending[:0]
+				prevKey = rec.Key
+				records = append(records, rec)
+			}
+		}
+	}
+
+	if len(pending) != 0 {
+		return nil, fmt.Errorf("unterminated fragmented record in %s", dataPath)
+	}
+	return records, nil
+}
+
+// GetDirTotalSize returns the total size (in bytes) of all .data files in a directory.
+// Uses os.Stat which is metadata-only (no I/O through BlockManager needed for file size).
+func (m *Manager) GetDirTotalSize(dir string) (int64, error) {
+	pattern := filepath.Join(dir, "sst_*.data")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return 0, err
+	}
+
+	var total int64
+	for _, p := range matches {
+		info, err := os.Stat(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return 0, err
+		}
+		total += info.Size()
+	}
+	return total, nil
+}

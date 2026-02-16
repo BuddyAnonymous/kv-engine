@@ -356,3 +356,62 @@ func decodeProbMetaPayload(payload []byte, onRecord func(model.ProbMetaRecord) e
 	}
 	return nil
 }
+
+// ReadAllProbMeta reads every ProbMeta record from the probmeta file.
+func (m *Manager) ReadAllProbMeta() ([]model.ProbMetaRecord, error) {
+	p := m.probMetaPath()
+	blockCount, err := m.countBlocks(p, probMetaBlockSize)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var records []model.ProbMetaRecord
+	maxPayload := probMetaBlockSize - crcBytes - payloadLenBytes
+	for blockNo := uint64(0); blockNo < blockCount; blockNo++ {
+		blockData, err := m.bm.ReadBlock(p, blockNo, probMetaBlockSize)
+		if err != nil {
+			return nil, err
+		}
+
+		payloadLen := int(binary.LittleEndian.Uint32(blockData[:payloadLenBytes]))
+		if payloadLen < 0 || payloadLen > maxPayload {
+			return nil, fmt.Errorf("invalid probmeta payload length at %s block %d: %d", p, blockNo, payloadLen)
+		}
+
+		crcWant := binary.LittleEndian.Uint32(blockData[probMetaBlockSize-crcBytes:])
+		crcGot := crc32.ChecksumIEEE(blockData[:probMetaBlockSize-crcBytes])
+		if crcGot != crcWant {
+			return nil, fmt.Errorf("crc mismatch at %s block %d", p, blockNo)
+		}
+		if payloadLen == 0 {
+			continue
+		}
+
+		payload := make([]byte, payloadLen)
+		copy(payload, blockData[payloadLenBytes:payloadLenBytes+payloadLen])
+		if err := decodeProbMetaPayload(payload, func(rec model.ProbMetaRecord) error {
+			records = append(records, rec)
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return records, nil
+}
+
+// RewriteProbMeta replaces the probmeta file with only the given records.
+func (m *Manager) RewriteProbMeta(records []model.ProbMetaRecord) error {
+	p := m.probMetaPath()
+	// Remove old file first.
+	_ = os.Remove(p)
+
+	for _, rec := range records {
+		if err := m.AppendProbMeta(rec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
