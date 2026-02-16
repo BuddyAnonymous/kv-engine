@@ -7,6 +7,15 @@
   "wal_segment_max_records": 1000,
   "multi_file_sstable" : true,
   "memtable_type": "btree",
-  "memtable_instances": 4,
-  "btree_degree": 4
+  "memtable_instances": 2,
+  "btree_degree": 4,
+  "summary_stride": 4,
+  "bf_expected_elements": 10000,
+  "bf_false_positive_rate": 0.01,
+  "bf_seed": 0,
+  "cms_epsilon": 0.001,
+  "cms_delta": 0.01,
+  "cms_seed": 0,
+  "hll_precision": 14,
+  "hll_seed": 0
 }
