@@ -7,8 +7,14 @@ import (
 	"path/filepath"
 
 	"kv-engine/internal/block"
+	"kv-engine/internal/model"
 	"kv-engine/internal/wal"
 )
+
+// noopApplier zadovoljava wal.RecordApplier ali ne radi nista (za testove).
+type noopApplier struct{}
+
+func (noopApplier) ApplyRecord(_ model.Record, _ bool) error { return nil }
 
 func makePayload(seed byte, length int) []byte {
 	data := make([]byte, length)
@@ -30,7 +36,7 @@ func main() {
 
 	bm := block.NewBlockManager(cacheSize)
 
-	manager, err, _ := wal.NewWALManager(walDir, segmentBlocks, blockSize, bm)
+	manager, err, _ := wal.NewWALManager(walDir, segmentBlocks, blockSize, bm, noopApplier{})
 	if err != nil {
 		log.Fatal("NewWALManager error:", err)
 	}
@@ -73,7 +79,7 @@ func main() {
 	}
 
 	fmt.Println("\n=== WAL RESTART + REPLAY TEST ===")
-	recovered, err, _ := wal.NewWALManager(walDir, segmentBlocks, blockSize, bm)
+	recovered, err, _ := wal.NewWALManager(walDir, segmentBlocks, blockSize, bm, noopApplier{})
 	if err != nil {
 		log.Fatal("NewWALManager(restart) error:", err)
 	}
@@ -85,7 +91,7 @@ func main() {
 		recovered.CurrentSegment.RemainingInBlock,
 	)
 
-	blockIdx, offset, err, _ := wal.ReplayWAL(recovered.FirstSegmentID, recovered.SegmentID, walDir, bm)
+	blockIdx, offset, err, _ := wal.ReplayWAL(recovered.FirstSegmentID, recovered.SegmentID, walDir, bm, noopApplier{})
 	if err != nil {
 		log.Fatal("ReplayWAL error:", err)
 	}

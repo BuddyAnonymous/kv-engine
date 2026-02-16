@@ -9,6 +9,7 @@ import (
 type Config struct {
 	DataDir              string `json:"data_dir"`
 	BlockSize            int    `json:"block_size"`
+	SegmentBlocks        int    `json:"segment_blocks"`
 	MemtableMaxEntries   int    `json:"memtable_max_entries"`
 	WALSegmentMaxRecords int    `json:"wal_segment_max_records"`
 	MultiFileSSTable     bool   `json:"multi_file_sstable"`
@@ -34,6 +35,7 @@ func Default() Config {
 	return Config{
 		DataDir:              "data",
 		BlockSize:            4096,
+		SegmentBlocks:        8,
 		MemtableMaxEntries:   1000,
 		WALSegmentMaxRecords: 1000,
 		MultiFileSSTable:     true,
@@ -134,6 +136,10 @@ func (c *Config) Normalize() {
 	// HLL precision: practical range [4,18]
 	if c.HLLPrecision < 4 || c.HLLPrecision > 18 {
 		c.HLLPrecision = d.HLLPrecision
+	}
+
+	if c.SegmentBlocks <= 0 {
+		c.SegmentBlocks = d.SegmentBlocks
 	}
 }
 

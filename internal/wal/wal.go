@@ -4,12 +4,17 @@ import (
 	"fmt"
 	"hash/crc32"
 	"kv-engine/internal/block"
-	"kv-engine/internal/engine"
+	"kv-engine/internal/model"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 )
+
+// RecordApplier je interfejs za primenu WAL zapisa (razbija ciklicni import sa engine).
+type RecordApplier interface {
+	ApplyRecord(rec model.Record, fromWAL bool) error
+}
 
 type WALManager struct {
 	DirPath          string
@@ -19,10 +24,10 @@ type WALManager struct {
 	SegmentID        int
 	FirstSegmentID   int
 	bm               *block.BlockManager
-	e                engine.Engine
+	applier          RecordApplier
 }
 
-func NewWALManager(dirpath string, configMaxSegmentBlocks int, configBlockSize int, bm *block.BlockManager, e engine.Engine) (*WALManager, error, uint64) {
+func NewWALManager(dirpath string, configMaxSegmentBlocks int, configBlockSize int, bm *block.BlockManager, applier RecordApplier) (*WALManager, error, uint64) {
 	// Kreiraj direktorijum ako ne postoji
 	if err := os.MkdirAll(dirpath, os.ModePerm); err != nil {
 		return nil, err, 0
@@ -38,7 +43,7 @@ func NewWALManager(dirpath string, configMaxSegmentBlocks int, configBlockSize i
 		BlockSize:        configBlockSize,
 		MaxSegmentBlocks: configMaxSegmentBlocks,
 		bm:               bm,
-		e:                e,
+		applier:          applier,
 	}
 	// SCENARIO 1: WAL NE POSTOJI
 	if len(files) == 0 {
@@ -98,7 +103,7 @@ func NewWALManager(dirpath string, configMaxSegmentBlocks int, configBlockSize i
 	}
 
 	// Reprodukcija WAL-a od prvog do poslednjeg segmenta, i pronalazak trenutne pozicije u poslednjem segmentu
-	currentBlock, currentOffset, err, lastSeq := ReplayWAL(firstID, lastID, dirpath, bm, e)
+	currentBlock, currentOffset, err, lastSeq := ReplayWAL(firstID, lastID, dirpath, bm, applier)
 	if err != nil {
 		file.Close()
 		return nil, err, 0
@@ -135,7 +140,7 @@ func NewWALManager(dirpath string, configMaxSegmentBlocks int, configBlockSize i
 	return manager, nil, lastSeq
 }
 
-func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, e engine.Engine) (int, int, error, uint64) {
+func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, applier RecordApplier) (int, int, error, uint64) {
 	var completeData []byte
 	lastSeq := uint64(0)
 	for i := firstID; i <= lastID; i++ {
@@ -218,7 +223,7 @@ func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, 
 				}
 
 				modelRecord := record.ToRecord()
-				e.ApplyRecord(modelRecord, true)
+				applier.ApplyRecord(modelRecord, true)
 
 				completeData = nil
 				offset += WALFragmentHeaderSize + int(dataLen)
@@ -351,6 +356,18 @@ func (m *WALManager) Write(seq uint64, expiresAt uint64, opType byte, key []byte
 	}
 
 	return nil
+}
+
+// Append upisuje model.Record u WAL koristeci bitpacked OpType.
+func (m *WALManager) Append(rec model.Record) error {
+	var op byte
+	if rec.Tombstone {
+		op = OpDelete
+	} else {
+		op = OpPut
+	}
+	packed := PackOpType(op, rec.Kind, rec.Structure, rec.Op)
+	return m.Write(rec.Seq, rec.ExpiresAt, packed, []byte(rec.Key), rec.Value)
 }
 
 func (m *WALManager) writeBytesToCurrentBlock(data []byte) error {
