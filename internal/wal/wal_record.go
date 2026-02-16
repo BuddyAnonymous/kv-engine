@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"kv-engine/internal/model"
 )
 
 const (
@@ -12,11 +13,37 @@ const (
 	OpPut    byte = 1
 )
 
+// Bit layout za OpType (1 byte):
+//   bit 0     : op       (0=DELETE, 1=PUT)
+//   bit 1     : kind     (0=KV, 1=MergeOperand)
+//   bits 2-3  : structure(0=None, 1=BF, 2=CMS, 3=HLL)
+//   bit 4     : mergeOp  (0=None, 1=Add)
+//   bits 5-7  : reserved
+
+// PackOpType pakuje op, kind, structure i mergeOp u jedan byte.
+func PackOpType(op byte, kind model.RecordKind, structure model.StructureType, mergeOp model.MergeOpType) byte {
+	var b byte
+	b |= op & 0x01          // bit 0
+	b |= (byte(kind) & 0x01) << 1  // bit 1
+	b |= (byte(structure) & 0x03) << 2 // bits 2-3
+	b |= (byte(mergeOp) & 0x01) << 4   // bit 4
+	return b
+}
+
+// UnpackOpType raspakuje op, kind, structure i mergeOp iz jednog bajta.
+func UnpackOpType(b byte) (op byte, kind model.RecordKind, structure model.StructureType, mergeOp model.MergeOpType) {
+	op = b & 0x01
+	kind = model.RecordKind((b >> 1) & 0x01)
+	structure = model.StructureType((b >> 2) & 0x03)
+	mergeOp = model.MergeOpType((b >> 4) & 0x01)
+	return
+}
+
 type WALRecord struct {
 	CRC32     uint32
 	Seq       uint64
 	ExpiresAt uint64
-	OpType    byte // 0 = DELETE, 1 = PUT
+	OpType    byte // bitpacked: op|kind|structure|mergeOp
 	KeyLen    uint32
 	ValueLen  uint32
 	Key       []byte
@@ -115,4 +142,34 @@ func DeserializeWALRecord(data []byte) (*WALRecord, error) {
 	}
 
 	return record, nil
+}
+
+// ToRecord konvertuje WALRecord u model.Record raspakovanjem OpType bajta.
+func (r *WALRecord) ToRecord() model.Record {
+	op, kind, structure, mergeOp := UnpackOpType(r.OpType)
+	return model.Record{
+		Key:       string(r.Key),
+		Value:     r.Value,
+		Tombstone: op == OpDelete,
+		Seq:       r.Seq,
+		ExpiresAt: r.ExpiresAt,
+		Kind:      kind,
+		Structure: structure,
+		Op:        mergeOp,
+	}
+}
+
+// NewWALRecordFromModel kreira WALRecord iz model.Record sa bitpacked OpType.
+func NewWALRecordFromModel(rec model.Record) *WALRecord {
+	var op byte
+	if rec.Tombstone {
+		op = OpDelete
+	} else {
+		op = OpPut
+	}
+	packed := PackOpType(op, rec.Kind, rec.Structure, rec.Op)
+	return NewWALRecord(
+		rec.Seq, rec.ExpiresAt, packed,
+		[]byte(rec.Key), rec.Value,
+	)
 }
