@@ -14,6 +14,9 @@ import (
 	"kv-engine/internal/model"
 	"kv-engine/internal/sstable"
 	"kv-engine/internal/wal"
+
+	"kv-engine/internal/probabilistic/bloom"
+	"kv-engine/internal/probabilistic/cms"
 )
 
 type Engine struct {
@@ -239,17 +242,11 @@ func (e *Engine) BFGet(key string, value []byte) (bool, error) {
 		return false, err
 	}
 
-	present := make(map[string]struct{}, len(ops))
-	for _, rec := range ops {
-		if rec.Seq <= meta.Seq {
-			continue
-		}
-		v := string(rec.Value)
-		present[v] = struct{}{}
+	bloom, err := bloom.Merge(ops, int(meta.BFExpectedElements), float64(meta.BFFalsePositiveRate))
+	if err != nil {
+		return false, err
 	}
-
-	_, ok := present[string(value)]
-	return ok, nil
+	return bloom.MightContain(value), nil
 }
 
 func (e *Engine) CMSGet(key string, value []byte) (uint64, error) {
@@ -266,17 +263,8 @@ func (e *Engine) CMSGet(key string, value []byte) (uint64, error) {
 		return 0, err
 	}
 
-	var count uint64
-	for _, rec := range ops {
-		if rec.Seq <= meta.Seq {
-			continue
-		}
-		if !bytes.Equal(rec.Value, value) {
-			continue
-		}
-		count++
-	}
-	return count, nil
+	cms := cms.Merge(ops, meta.CMSEpsilon, meta.CMSDelta)
+	return cms.Estimate(value), nil
 }
 
 func (e *Engine) HLLGet(key string) (uint64, error) {

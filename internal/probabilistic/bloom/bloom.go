@@ -3,7 +3,7 @@ package bloom
 import (
 	"encoding/binary"
 	"errors"
-	"sync"
+	"kv-engine/internal/model"
 )
 
 var (
@@ -17,7 +17,6 @@ type BloomFilter struct {
 	seed   uint32         // seed za hash funkcije
 	bitset []byte         // bitset
 	hashes []HashWithSeed // hash funkcije
-	mutex  sync.RWMutex   // thread safety
 }
 
 // Konstruktor
@@ -50,8 +49,6 @@ func NewFromMeta(m uint, k uint, seed uint32) *BloomFilter {
 
 // Add dodaje element u Bloom filter
 func (bf *BloomFilter) Add(data []byte) {
-	bf.mutex.Lock()
-	defer bf.mutex.Unlock()
 
 	for _, h := range bf.hashes {
 		hash := h.Hash(data)
@@ -66,8 +63,6 @@ func (bf *BloomFilter) Add(data []byte) {
 
 // MightContain proverava da li element mozda postoji
 func (bf *BloomFilter) MightContain(data []byte) bool {
-	bf.mutex.RLock()
-	defer bf.mutex.RUnlock()
 
 	for _, h := range bf.hashes {
 		hash := h.Hash(data)
@@ -90,8 +85,6 @@ func (bf *BloomFilter) MightContain(data []byte) bool {
 // [8:12] -> seed
 // [12:]  -> bitset
 func (bf *BloomFilter) Serialize() ([]byte, error) {
-	bf.mutex.RLock()
-	defer bf.mutex.RUnlock()
 
 	if bf.m == 0 || bf.k == 0 {
 		return nil, ErrInvalidBloomData
@@ -142,46 +135,19 @@ func Deserialize(data []byte) (*BloomFilter, error) {
 	}, nil
 }
 
-// Merge dva blooma (kompakcija)
-func (bf *BloomFilter) Merge(other *BloomFilter) error {
-	if bf.m != other.m || bf.k != other.k || bf.seed != other.seed {
-		return ErrInvalidBloomMeta
+func Merge(ops []model.Record, capacity int, falsePositiveRate float64) (*BloomFilter, error) {
+	bf := NewBloomFilter(capacity, falsePositiveRate)
+
+	for _, rec := range ops {
+		if rec.Op == model.MergeOpAdd {
+			bf.Add(rec.Value)
+		}
 	}
+	return bf, nil
+}
 
-	bf.mutex.Lock()
-	defer bf.mutex.Unlock()
-
-	other.mutex.RLock()
-	defer other.mutex.RUnlock()
-
+func (bf *BloomFilter) Reset() {
 	for i := range bf.bitset {
-		bf.bitset[i] |= other.bitset[i]
+		bf.bitset[i] = 0
 	}
-	return nil
-}
-
-// -------- META BLOK --------
-
-func (bf *BloomFilter) SerializeMeta() []byte {
-	buf := make([]byte, 12)
-	binary.BigEndian.PutUint32(buf[0:4], uint32(bf.m))
-	binary.BigEndian.PutUint32(buf[4:8], uint32(bf.k))
-	binary.BigEndian.PutUint32(buf[8:12], bf.seed)
-	return buf
-}
-
-func DeserializeMeta(data []byte) (*BloomFilter, error) {
-	if len(data) != 12 {
-		return nil, ErrInvalidBloomMeta
-	}
-
-	m := uint(binary.BigEndian.Uint32(data[0:4]))
-	k := uint(binary.BigEndian.Uint32(data[4:8]))
-	seed := binary.BigEndian.Uint32(data[8:12])
-
-	if m == 0 || k == 0 {
-		return nil, ErrInvalidBloomMeta
-	}
-
-	return NewFromMeta(m, k, seed), nil
 }
