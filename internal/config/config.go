@@ -18,6 +18,7 @@ type Config struct {
 	BTreeDegree          int    `json:"btree_degree"`
 	MemtableInstances    int    `json:"memtable_instances"`
 	CacheSize            int    `json:"cache_size"`
+	BlockCacheSize       int    `json:"block_cache_size"`
 	SummaryStride        uint   `json:"summary_stride"`
 
 	// Probabilistic structure defaults (used on CREATE commands)
@@ -52,6 +53,7 @@ func Default() Config {
 		BTreeDegree:          16,
 		MemtableInstances:    1,
 		CacheSize:            8192,
+		BlockCacheSize:       8192,
 		SummaryStride:        4,
 		BFExpectedElements:   10000,
 		BFFalsePositiveRate:  0.01,
@@ -125,6 +127,11 @@ func (c *Config) Normalize() {
 	// CacheSize: mora biti >= 0
 	if c.CacheSize <= 0 {
 		c.CacheSize = d.CacheSize
+	}
+
+	// BlockCacheSize: mora biti >= 0
+	if c.BlockCacheSize <= 0 {
+		c.BlockCacheSize = d.BlockCacheSize
 	}
 
 	// SummaryStride: mora biti >= 1

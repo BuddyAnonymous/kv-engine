@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"kv-engine/internal/block"
+	"kv-engine/internal/cache"
 	"kv-engine/internal/config"
 	"kv-engine/internal/lsm"
 	"kv-engine/internal/memtable"
@@ -22,13 +23,15 @@ import (
 )
 
 type Engine struct {
-	cfg config.Config
-	bm  *block.BlockManager
-	wal *wal.WALManager
-	mem memtable.MemtableManagerIface
-	sst sstable.ManagerIface
-	lsm *lsm.LSMTree
-	seq uint64
+	cfg        config.Config
+	bm         *block.BlockManager
+	cache      *cache.Cache
+	wal        *wal.WALManager
+	mem        memtable.MemtableManagerIface
+	sst        sstable.ManagerIface
+	lsm        *lsm.LSMTree
+	seq        uint64
+	cacheEpoch uint64
 }
 
 func New(cfg config.Config) (*Engine, error) {
@@ -46,7 +49,7 @@ func New(cfg config.Config) (*Engine, error) {
 		return nil, err
 	}
 
-	bm := block.NewBlockManager(cfg.CacheSize)
+	bm := block.NewBlockManager(cfg.BlockCacheSize)
 
 	sstBaseDir := filepath.Join(cfg.DataDir, "sstable")
 	sstMgr := sstable.New(filepath.Join(sstBaseDir, "level0"), cfg.MultiFileSSTable, bm, cfg.BlockSize, uint64(cfg.SummaryStride))
@@ -66,11 +69,13 @@ func New(cfg config.Config) (*Engine, error) {
 	}
 
 	e := &Engine{
-		cfg: cfg,
-		bm:  bm,
-		mem: mem,
-		sst: sstMgr,
-		lsm: lsmTree,
+		cfg:        cfg,
+		bm:         bm,
+		cache:      cache.New(cfg.CacheSize),
+		mem:        mem,
+		sst:        sstMgr,
+		lsm:        lsmTree,
+		cacheEpoch: 1,
 	}
 
 	// Inicijalizuj WAL sa engine-om kao applier (replay se desava unutar NewWALManager)
@@ -145,7 +150,10 @@ func (e *Engine) Merge(structure model.StructureType, key string, value []byte, 
 		Op:        op,
 	}
 
-	return e.ApplyRecord(rec, false)
+	if err := e.ApplyRecord(rec, false); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (e *Engine) BFAdd(key string, value []byte, ttl ...time.Duration) error {
@@ -166,7 +174,11 @@ func (e *Engine) BFCreate(key string) error {
 		BFFalsePositiveRate: e.cfg.BFFalsePositiveRate,
 		BFSeed:              e.cfg.BFSeed,
 	}
-	return e.sst.AppendProbMeta(meta)
+	if err := e.sst.AppendProbMeta(meta); err != nil {
+		return err
+	}
+	e.invalidateStructureCache(model.StructureTypeBloomFilter, key)
+	return nil
 }
 
 func (e *Engine) BFDelete(key string) error {
@@ -180,7 +192,11 @@ func (e *Engine) BFDelete(key string) error {
 		Action:    model.ProbMetaActionDelete,
 		Seq:       e.seq,
 	}
-	return e.sst.AppendProbMeta(meta)
+	if err := e.sst.AppendProbMeta(meta); err != nil {
+		return err
+	}
+	e.invalidateStructureCache(model.StructureTypeBloomFilter, key)
+	return nil
 }
 
 func (e *Engine) CMSAdd(key string, value []byte, ttl ...time.Duration) error {
@@ -201,7 +217,11 @@ func (e *Engine) CMSCreate(key string) error {
 		CMSDelta:   e.cfg.CMSDelta,
 		CMSSeed:    e.cfg.CMSSeed,
 	}
-	return e.sst.AppendProbMeta(meta)
+	if err := e.sst.AppendProbMeta(meta); err != nil {
+		return err
+	}
+	e.invalidateStructureCache(model.StructureTypeCountMinSketch, key)
+	return nil
 }
 
 func (e *Engine) CMSDelete(key string) error {
@@ -215,7 +235,11 @@ func (e *Engine) CMSDelete(key string) error {
 		Action:    model.ProbMetaActionDelete,
 		Seq:       e.seq,
 	}
-	return e.sst.AppendProbMeta(meta)
+	if err := e.sst.AppendProbMeta(meta); err != nil {
+		return err
+	}
+	e.invalidateStructureCache(model.StructureTypeCountMinSketch, key)
+	return nil
 }
 
 func (e *Engine) HLLAdd(key string, value []byte, ttl ...time.Duration) error {
@@ -235,7 +259,11 @@ func (e *Engine) HLLCreate(key string) error {
 		HLLPrecision: e.cfg.HLLPrecision,
 		HLLSeed:      e.cfg.HLLSeed,
 	}
-	return e.sst.AppendProbMeta(meta)
+	if err := e.sst.AppendProbMeta(meta); err != nil {
+		return err
+	}
+	e.invalidateStructureCache(model.StructureTypeHyperLogLog, key)
+	return nil
 }
 
 func (e *Engine) HLLDelete(key string) error {
@@ -249,7 +277,11 @@ func (e *Engine) HLLDelete(key string) error {
 		Action:    model.ProbMetaActionDelete,
 		Seq:       e.seq,
 	}
-	return e.sst.AppendProbMeta(meta)
+	if err := e.sst.AppendProbMeta(meta); err != nil {
+		return err
+	}
+	e.invalidateStructureCache(model.StructureTypeHyperLogLog, key)
+	return nil
 }
 
 func (e *Engine) BFGet(key string, value []byte) (bool, error) {
@@ -258,7 +290,11 @@ func (e *Engine) BFGet(key string, value []byte) (bool, error) {
 		return false, err
 	}
 	if !found || meta.Action != model.ProbMetaActionCreate {
+		e.invalidateStructureCache(model.StructureTypeBloomFilter, key)
 		return false, nil
+	}
+	if bf, ok := e.getBloomFromCache(key); ok {
+		return bf.MightContain(value), nil
 	}
 
 	ops, err := e.getAllMergeOperands(model.StructureTypeBloomFilter, key)
@@ -266,11 +302,12 @@ func (e *Engine) BFGet(key string, value []byte) (bool, error) {
 		return false, err
 	}
 
-	bloom, err := bloom.Merge(ops, int(meta.BFExpectedElements), float64(meta.BFFalsePositiveRate))
+	bf, err := bloom.Merge(ops, int(meta.BFExpectedElements), float64(meta.BFFalsePositiveRate))
 	if err != nil {
 		return false, err
 	}
-	return bloom.MightContain(value), nil
+	e.putBloomToCache(key, bf, maxSeq(meta.Seq, maxSeqFromRecords(ops)))
+	return bf.MightContain(value), nil
 }
 
 func (e *Engine) CMSGet(key string, value []byte) (uint64, error) {
@@ -279,7 +316,11 @@ func (e *Engine) CMSGet(key string, value []byte) (uint64, error) {
 		return 0, err
 	}
 	if !found || meta.Action != model.ProbMetaActionCreate {
+		e.invalidateStructureCache(model.StructureTypeCountMinSketch, key)
 		return 0, nil
+	}
+	if sketch, ok := e.getCMSFromCache(key); ok {
+		return sketch.Estimate(value), nil
 	}
 
 	ops, err := e.getAllMergeOperands(model.StructureTypeCountMinSketch, key)
@@ -287,8 +328,9 @@ func (e *Engine) CMSGet(key string, value []byte) (uint64, error) {
 		return 0, err
 	}
 
-	cms := cms.Merge(ops, meta.CMSEpsilon, meta.CMSDelta)
-	return cms.Estimate(value), nil
+	sketch := cms.Merge(ops, meta.CMSEpsilon, meta.CMSDelta)
+	e.putCMSToCache(key, sketch, maxSeq(meta.Seq, maxSeqFromRecords(ops)))
+	return sketch.Estimate(value), nil
 }
 
 func (e *Engine) HLLGet(key string) (uint64, error) {
@@ -297,7 +339,11 @@ func (e *Engine) HLLGet(key string) (uint64, error) {
 		return 0, err
 	}
 	if !found || meta.Action != model.ProbMetaActionCreate {
+		e.invalidateStructureCache(model.StructureTypeHyperLogLog, key)
 		return 0, nil
+	}
+	if structure, ok := e.getHLLFromCache(key); ok {
+		return uint64(structure.Estimate()), nil
 	}
 
 	ops, err := e.getAllMergeOperands(model.StructureTypeHyperLogLog, key)
@@ -305,8 +351,9 @@ func (e *Engine) HLLGet(key string) (uint64, error) {
 		return 0, err
 	}
 
-	hll := hll.Merge(ops, meta.HLLPrecision, meta.HLLSeed)
-	return uint64(hll.Estimate()), nil
+	structure := hll.Merge(ops, meta.HLLPrecision, meta.HLLSeed)
+	e.putHLLToCache(key, structure, maxSeq(meta.Seq, maxSeqFromRecords(ops)))
+	return uint64(structure.Estimate()), nil
 }
 
 func (e *Engine) Delete(key string) error {
@@ -326,14 +373,20 @@ func (e *Engine) Delete(key string) error {
 }
 
 func (e *Engine) Get(key string) ([]byte, bool, error) {
+	if val, ok := e.getKVFromCache(key); ok {
+		return val, true, nil
+	}
+
 	now := uint64(time.Now().Unix())
 
 	// 1) Memtable
 	r := e.mem.Get(key)
 	if r.Found {
 		if r.Tombstone || (r.ExpiresAt > 0 && r.ExpiresAt <= now) {
+			e.invalidateKVCache(key)
 			return nil, false, nil
 		}
+		e.putKVToCache(key, r.Value, r.Seq, r.ExpiresAt)
 		return r.Value, true, nil
 	}
 
@@ -343,8 +396,10 @@ func (e *Engine) Get(key string) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	if !found {
+		e.invalidateKVCache(key)
 		return nil, false, nil
 	}
+	e.putKVToCache(key, val, 0, 0)
 	return val, true, nil
 }
 
@@ -360,6 +415,7 @@ func (e *Engine) flushMemtable() error {
 	if err := e.lsm.Flush(records); err != nil {
 		return err
 	}
+	e.bumpCacheEpoch()
 
 	// During startup WAL replay e.wal is not assigned yet. In normal runtime,
 	// after a successful flush we can safely drop fully persisted WAL segments.
@@ -419,6 +475,23 @@ func (e *Engine) getAllMergeOperands(structure model.StructureType, key string) 
 	return ops, nil
 }
 
+func maxSeqFromRecords(records []model.Record) uint64 {
+	var out uint64
+	for _, rec := range records {
+		if rec.Seq > out {
+			out = rec.Seq
+		}
+	}
+	return out
+}
+
+func maxSeq(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func structureName(s model.StructureType) string {
 	switch s {
 	case model.StructureTypeBloomFilter:
@@ -457,7 +530,24 @@ func (e *Engine) ApplyRecord(rec model.Record, fromWAL bool) error {
 		return err
 	}
 	if flushNeeded {
-		return e.flushMemtable()
+		if err := e.flushMemtable(); err != nil {
+			return err
+		}
 	}
+
+	if !fromWAL {
+		if rec.Kind == model.RecordKindKV {
+			if rec.Tombstone || (rec.ExpiresAt > 0 && rec.ExpiresAt <= uint64(time.Now().Unix())) {
+				e.invalidateKVCache(rec.Key)
+			} else {
+				e.putKVToCache(rec.Key, rec.Value, rec.Seq, rec.ExpiresAt)
+			}
+		} else {
+			if !e.updateStructureCacheOnMergeAdd(rec) {
+				e.invalidateStructureCache(rec.Structure, rec.Key)
+			}
+		}
+	}
+
 	return nil
 }
