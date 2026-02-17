@@ -64,6 +64,10 @@ func (m *Manager) maybeKeyInFilter(dataPath, key string) (bool, error) {
 	filterPath := basePath + ".filter"
 
 	if _, err := os.Stat(filterPath); err != nil {
+		if os.IsNotExist(err) {
+			// Missing filter means we must fall back to data lookup.
+			return true, nil
+		}
 		return false, err
 	}
 

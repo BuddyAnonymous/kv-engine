@@ -58,12 +58,11 @@ func (m *Manager) WriteMultiFile(path string, records []model.Record) error {
 		return err
 	}
 
-	return nil
+	return m.writeTOC(path, tocModeMulti)
 }
 
 func (m *Manager) WriteSingleFile(path string, records []model.Record) error {
-
-	return nil
+	return m.writeSingleFile(path, records)
 }
 
 // ---------- Block writer helper ----------

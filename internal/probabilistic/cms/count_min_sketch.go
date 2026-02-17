@@ -148,7 +148,7 @@ func Merge(ops []model.Record, epsilon float64, delta float64) *CountMinSketch {
 
 	for _, rec := range ops {
 		if rec.Op == model.MergeOpAdd {
-			cms.Add([]byte(rec.Key))
+			cms.Add([]byte(rec.Value))
 		}
 	}
 	return cms

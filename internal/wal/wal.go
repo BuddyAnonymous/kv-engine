@@ -54,6 +54,10 @@ func writePersistedSeq(bm *block.BlockManager, dirpath string, seq uint64, block
 }
 
 func NewWALManager(dirpath string, configMaxSegmentBlocks int, configBlockSize int, bm *block.BlockManager, applier RecordApplier) (*WALManager, error, uint64) {
+	if applier == nil {
+		return nil, fmt.Errorf("WAL applier is nil"), 0
+	}
+
 	// Kreiraj direktorijum ako ne postoji
 	if err := os.MkdirAll(dirpath, os.ModePerm); err != nil {
 		return nil, err, 0
@@ -170,6 +174,10 @@ func NewWALManager(dirpath string, configMaxSegmentBlocks int, configBlockSize i
 }
 
 func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, applier RecordApplier, persistedSeq uint64) (int, int, error, uint64) {
+	if applier == nil {
+		return -1, -1, fmt.Errorf("WAL applier is nil"), 0
+	}
+
 	var completeData []byte
 	lastSeq := uint64(0)
 	for i := firstID; i <= lastID; i++ {

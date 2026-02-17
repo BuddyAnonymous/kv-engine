@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -49,32 +50,19 @@ func (m *Manager) ValidateMerkle(table string) (model.MerkleValidationResult, er
 		return model.MerkleValidationResult{}, err
 	}
 
-	expRoot, expLeaves, err := m.readMerkleFile(basePath + ".merkle")
-	if err != nil {
-		return model.MerkleValidationResult{}, err
-	}
-	values, err := m.readAllDataValues(basePath + ".data")
+	mode, err := m.resolveTableMode(basePath)
 	if err != nil {
 		return model.MerkleValidationResult{}, err
 	}
 
-	actLeaves := make([][32]byte, 0, len(values))
-	for _, v := range values {
-		actLeaves = append(actLeaves, sha256.Sum256(v))
+	switch mode {
+	case tocModeSingle:
+		return m.validateSingleFileMerkle(basePath)
+	case tocModeMulti:
+		return m.validateMultiFileMerkle(basePath)
+	default:
+		return model.MerkleValidationResult{}, fmt.Errorf("unsupported sstable mode %d for %s", mode, basePath)
 	}
-	actRoot := buildMerkleRoot(actLeaves)
-
-	changed := diffLeafHashes(expLeaves, actLeaves)
-	valid := len(changed) == 0 && expRoot == actRoot
-
-	return model.MerkleValidationResult{
-		Valid:              valid,
-		ChangedLeafIndices: changed,
-		ExpectedRootHex:    hex.EncodeToString(expRoot[:]),
-		ActualRootHex:      hex.EncodeToString(actRoot[:]),
-		ExpectedLeafCount:  len(expLeaves),
-		ActualLeafCount:    len(actLeaves),
-	}, nil
 }
 
 func (m *Manager) readMerkleFile(path string) ([32]byte, [][32]byte, error) {
@@ -90,50 +78,7 @@ func (m *Manager) readMerkleFile(path string) ([32]byte, [][32]byte, error) {
 	if err != nil {
 		return [32]byte{}, nil, err
 	}
-	if len(payload) < 8 {
-		return [32]byte{}, nil, fmt.Errorf("merkle header too short in %s", path)
-	}
-	if string(payload[:4]) != string(m.merkleMagic[:]) {
-		return [32]byte{}, nil, fmt.Errorf("invalid merkle payload magic in %s", path)
-	}
-
-	off := 8
-	version, err := readUvarintAt(payload, &off)
-	if err != nil {
-		return [32]byte{}, nil, err
-	}
-	if version != merkleFormatVersion {
-		return [32]byte{}, nil, fmt.Errorf("unsupported merkle format version %d in %s", version, path)
-	}
-
-	leafCountU, err := readUvarintAt(payload, &off)
-	if err != nil {
-		return [32]byte{}, nil, err
-	}
-	leafCount, err := checkedChunkLen(leafCountU, 1<<30, "merkle leaf count")
-	if err != nil {
-		return [32]byte{}, nil, err
-	}
-
-	if off+32 > len(payload) {
-		return [32]byte{}, nil, fmt.Errorf("merkle root out of bounds in %s", path)
-	}
-	var root [32]byte
-	copy(root[:], payload[off:off+32])
-	off += 32
-
-	if off+leafCount*32 > len(payload) {
-		return [32]byte{}, nil, fmt.Errorf("merkle leaves out of bounds in %s", path)
-	}
-	leaves := make([][32]byte, leafCount)
-	for i := 0; i < leafCount; i++ {
-		copy(leaves[i][:], payload[off:off+32])
-		off += 32
-	}
-	if off != len(payload) {
-		return [32]byte{}, nil, fmt.Errorf("merkle trailing bytes in %s", path)
-	}
-	return root, leaves, nil
+	return m.parseMerklePayload(payload, path)
 }
 
 func (m *Manager) readAllDataValues(dataPath string) ([][]byte, error) {
@@ -282,7 +227,7 @@ func (m *Manager) resolveSSTBasePath(table string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("sstable name is empty")
 	}
-	for _, ext := range []string{".data", ".index", ".summary", ".filter", ".merkle"} {
+	for _, ext := range []string{".data", ".index", ".summary", ".filter", ".merkle", ".sst", ".toc"} {
 		if strings.HasSuffix(name, ext) {
 			name = strings.TrimSuffix(name, ext)
 			break
@@ -292,4 +237,154 @@ func (m *Manager) resolveSSTBasePath(table string) (string, error) {
 		return name, nil
 	}
 	return filepath.Join(m.dir, name), nil
+}
+
+func (m *Manager) validateMultiFileMerkle(basePath string) (model.MerkleValidationResult, error) {
+	expRoot, expLeaves, err := m.readMerkleFile(basePath + ".merkle")
+	if err != nil {
+		return model.MerkleValidationResult{}, err
+	}
+	values, err := m.readAllDataValues(basePath + ".data")
+	if err != nil {
+		return model.MerkleValidationResult{}, err
+	}
+
+	return buildMerkleValidationResult(values, expRoot, expLeaves), nil
+}
+
+func (m *Manager) validateSingleFileMerkle(basePath string) (model.MerkleValidationResult, error) {
+	singlePath := basePath + ".sst"
+	footer, blockSize, err := m.readSingleFooter(singlePath)
+	if err != nil {
+		return model.MerkleValidationResult{}, err
+	}
+
+	expRoot, expLeaves, err := m.readMerkleFromSingleSection(singlePath, footer, blockSize)
+	if err != nil {
+		return model.MerkleValidationResult{}, err
+	}
+	values, err := m.readAllSingleDataValues(singlePath, footer, blockSize)
+	if err != nil {
+		return model.MerkleValidationResult{}, err
+	}
+
+	return buildMerkleValidationResult(values, expRoot, expLeaves), nil
+}
+
+func buildMerkleValidationResult(values [][]byte, expRoot [32]byte, expLeaves [][32]byte) model.MerkleValidationResult {
+	actLeaves := make([][32]byte, 0, len(values))
+	for _, v := range values {
+		actLeaves = append(actLeaves, sha256.Sum256(v))
+	}
+	actRoot := buildMerkleRoot(actLeaves)
+
+	changed := diffLeafHashes(expLeaves, actLeaves)
+	valid := len(changed) == 0 && expRoot == actRoot
+
+	return model.MerkleValidationResult{
+		Valid:              valid,
+		ChangedLeafIndices: changed,
+		ExpectedRootHex:    hex.EncodeToString(expRoot[:]),
+		ActualRootHex:      hex.EncodeToString(actRoot[:]),
+		ExpectedLeafCount:  len(expLeaves),
+		ActualLeafCount:    len(actLeaves),
+	}
+}
+
+func (m *Manager) resolveTableMode(basePath string) (uint64, error) {
+	tocPath := basePath + ".toc"
+	if _, err := os.Stat(tocPath); err == nil {
+		return m.readTOCMode(tocPath)
+	} else if !os.IsNotExist(err) {
+		return 0, err
+	}
+
+	if _, err := os.Stat(basePath + ".sst"); err == nil {
+		return tocModeSingle, nil
+	} else if !os.IsNotExist(err) {
+		return 0, err
+	}
+	if _, err := os.Stat(basePath + ".data"); err == nil {
+		return tocModeMulti, nil
+	} else if !os.IsNotExist(err) {
+		return 0, err
+	}
+
+	return 0, fmt.Errorf("sstable not found for base path %s", basePath)
+}
+
+func (m *Manager) readMerkleFromSingleSection(singlePath string, footer singleFileFooter, blockSize int) ([32]byte, [][32]byte, error) {
+	if footer.MerkleLen == 0 {
+		return [32]byte{}, nil, fmt.Errorf("single file has empty merkle section: %s", singlePath)
+	}
+
+	payload := make([]byte, 0, int(footer.MerkleLen)*blockSize)
+	for i := uint64(0); i < footer.MerkleLen; i++ {
+		chunk, err := m.readPayloadBlock(singlePath, blockSize, footer.MerkleOffset+i)
+		if err != nil {
+			return [32]byte{}, nil, err
+		}
+		payload = append(payload, chunk...)
+	}
+
+	return m.parseMerklePayload(payload, singlePath)
+}
+
+func (m *Manager) readAllSingleDataValues(singlePath string, footer singleFileFooter, blockSize int) ([][]byte, error) {
+	values := make([][]byte, 0)
+	err := m.scanSingleDataSection(singlePath, blockSize, footer, func(rec model.Record) (bool, error) {
+		values = append(values, append([]byte(nil), rec.Value...))
+		return false, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func (m *Manager) parseMerklePayload(payload []byte, path string) ([32]byte, [][32]byte, error) {
+	if len(payload) < 8 {
+		return [32]byte{}, nil, fmt.Errorf("merkle header too short in %s", path)
+	}
+	if string(payload[:4]) != string(m.merkleMagic[:]) {
+		return [32]byte{}, nil, fmt.Errorf("invalid merkle payload magic in %s", path)
+	}
+
+	off := 8
+	version, err := readUvarintAt(payload, &off)
+	if err != nil {
+		return [32]byte{}, nil, err
+	}
+	if version != merkleFormatVersion {
+		return [32]byte{}, nil, fmt.Errorf("unsupported merkle format version %d in %s", version, path)
+	}
+
+	leafCountU, err := readUvarintAt(payload, &off)
+	if err != nil {
+		return [32]byte{}, nil, err
+	}
+	leafCount, err := checkedChunkLen(leafCountU, 1<<30, "merkle leaf count")
+	if err != nil {
+		return [32]byte{}, nil, err
+	}
+
+	if off+32 > len(payload) {
+		return [32]byte{}, nil, fmt.Errorf("merkle root out of bounds in %s", path)
+	}
+	var root [32]byte
+	copy(root[:], payload[off:off+32])
+	off += 32
+
+	if off+leafCount*32 > len(payload) {
+		return [32]byte{}, nil, fmt.Errorf("merkle leaves out of bounds in %s", path)
+	}
+	leaves := make([][32]byte, leafCount)
+	for i := 0; i < leafCount; i++ {
+		copy(leaves[i][:], payload[off:off+32])
+		off += 32
+	}
+	if off != len(payload) {
+		return [32]byte{}, nil, fmt.Errorf("merkle trailing bytes in %s", path)
+	}
+	return root, leaves, nil
 }

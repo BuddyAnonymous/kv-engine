@@ -360,6 +360,23 @@ func (e *Engine) flushMemtable() error {
 	if err := e.lsm.Flush(records); err != nil {
 		return err
 	}
+
+	// During startup WAL replay e.wal is not assigned yet. In normal runtime,
+	// after a successful flush we can safely drop fully persisted WAL segments.
+	if e.wal != nil {
+		var maxSeq uint64
+		for _, rec := range records {
+			if rec.Seq > maxSeq {
+				maxSeq = rec.Seq
+			}
+		}
+		if maxSeq > 0 {
+			if err := e.wal.CheckWAL(maxSeq); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 

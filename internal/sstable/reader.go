@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -39,87 +38,159 @@ type fileHeader struct {
 }
 
 func (m *Manager) Get(key string) ([]byte, bool, error) {
-	if !m.multiFileSSTable {
-		return nil, false, fmt.Errorf("single-file sstable get is not implemented")
-	}
-
-	dataFiles, err := m.listDataFilesNewestFirst()
+	tables, err := m.listAllTableRefsNewestFirst()
 	if err != nil {
 		return nil, false, err
 	}
-	if len(dataFiles) == 0 {
+	if len(tables) == 0 {
 		return nil, false, nil
 	}
 
 	now := uint64(time.Now().Unix())
-	for _, dataPath := range dataFiles {
-		maybeInFilter, err := m.maybeKeyInFilter(dataPath, key)
-		if err != nil {
-			return nil, false, err
-		}
-		if !maybeInFilter {
-			continue
-		}
+	for _, tbl := range tables {
+		switch tbl.mode {
+		case tocModeSingle:
+			singlePath := tbl.basePath + ".sst"
+			footer, blockSize, err := m.readSingleFooter(singlePath)
+			if err != nil {
+				return nil, false, err
+			}
+			maybeInFilter, err := m.maybeKeyInSingleFilter(singlePath, footer, blockSize, key)
+			if err != nil {
+				return nil, false, err
+			}
+			if !maybeInFilter {
+				continue
+			}
+			var (
+				best  model.Record
+				found bool
+			)
+			err = m.scanSingleDataSection(singlePath, blockSize, footer, func(rec model.Record) (bool, error) {
+				if rec.Key == key {
+					if rec.Kind == model.RecordKindKV && (!found || rec.Seq > best.Seq) {
+						best = rec
+						found = true
+					}
+					return false, nil
+				}
+				if rec.Key > key {
+					return true, nil
+				}
+				return false, nil
+			})
+			if err != nil {
+				return nil, false, err
+			}
+			if !found {
+				continue
+			}
+			if best.Tombstone || isExpired(best, now) {
+				return nil, false, nil
+			}
+			return best.Value, true, nil
 
-		rec, found, err := m.getLatestKVFromDataFile(dataPath, key)
-		if err != nil {
-			return nil, false, err
+		case tocModeMulti:
+			dataPath := tbl.basePath + ".data"
+			maybeInFilter, err := m.maybeKeyInFilter(dataPath, key)
+			if err != nil {
+				return nil, false, err
+			}
+			if !maybeInFilter {
+				continue
+			}
+
+			rec, found, err := m.getLatestKVFromDataFile(dataPath, key)
+			if err != nil {
+				return nil, false, err
+			}
+			if !found {
+				continue
+			}
+			if rec.Tombstone || isExpired(rec, now) {
+				return nil, false, nil
+			}
+			return rec.Value, true, nil
 		}
-		if !found {
-			continue
-		}
-		if rec.Tombstone || isExpired(rec, now) {
-			return nil, false, nil
-		}
-		return rec.Value, true, nil
 	}
 
 	return nil, false, nil
 }
 
 func (m *Manager) GetMergeOperands(structure model.StructureType, key string) ([]model.Record, error) {
-	if !m.multiFileSSTable {
-		return nil, fmt.Errorf("single-file sstable merge get is not implemented")
-	}
 	if structure == model.StructureTypeNone {
 		return nil, fmt.Errorf("invalid merge structure type")
 	}
 
-	dataFiles, err := m.listDataFilesNewestFirst()
+	tables, err := m.listAllTableRefsNewestFirst()
 	if err != nil {
 		return nil, err
 	}
-	if len(dataFiles) == 0 {
+	if len(tables) == 0 {
 		return nil, nil
 	}
 
 	now := uint64(time.Now().Unix())
 	var ops []model.Record
 
-	for _, dataPath := range dataFiles {
-		recs, found, err := m.getKeyRecordsFromDataFile(dataPath, key)
-		if err != nil {
-			return nil, err
-		}
-		if !found {
-			continue
-		}
+	for _, tbl := range tables {
+		switch tbl.mode {
+		case tocModeSingle:
+			singlePath := tbl.basePath + ".sst"
+			footer, blockSize, err := m.readSingleFooter(singlePath)
+			if err != nil {
+				return nil, err
+			}
+			err = m.scanSingleDataSection(singlePath, blockSize, footer, func(rec model.Record) (bool, error) {
+				if rec.Key < key {
+					return false, nil
+				}
+				if rec.Key > key {
+					return true, nil
+				}
+				if rec.Kind != model.RecordKindMergeOperand {
+					return false, nil
+				}
+				if rec.Structure != structure {
+					return false, nil
+				}
+				if rec.Op != model.MergeOpAdd {
+					return false, nil
+				}
+				if isExpired(rec, now) {
+					return false, nil
+				}
+				ops = append(ops, rec)
+				return false, nil
+			})
+			if err != nil {
+				return nil, err
+			}
 
-		for _, rec := range recs {
-			if rec.Kind != model.RecordKindMergeOperand {
+		case tocModeMulti:
+			dataPath := tbl.basePath + ".data"
+			recs, found, err := m.getKeyRecordsFromDataFile(dataPath, key)
+			if err != nil {
+				return nil, err
+			}
+			if !found {
 				continue
 			}
-			if rec.Structure != structure {
-				continue
+			for _, rec := range recs {
+				if rec.Kind != model.RecordKindMergeOperand {
+					continue
+				}
+				if rec.Structure != structure {
+					continue
+				}
+				if rec.Op != model.MergeOpAdd {
+					continue
+				}
+				if isExpired(rec, now) {
+					continue
+				}
+				ops = append(ops, rec)
 			}
-			if rec.Op != model.MergeOpAdd {
-				continue
-			}
-			if isExpired(rec, now) {
-				continue
-			}
-
-			ops = append(ops, rec)
 		}
 	}
 
@@ -236,72 +307,6 @@ func (m *Manager) locateDataRangeForAllKeyRecords(dataPath, key string) (blockSi
 	} else {
 		startDataBlock = 0
 	}
-
-	endDataBlock, err = m.countBlocks(dataPath, dataHdr.blockSize)
-	if err != nil {
-		return 0, 0, 0, false, err
-	}
-	if startDataBlock >= endDataBlock {
-		return 0, 0, 0, false, fmt.Errorf("invalid data block range [%d,%d) for %s", startDataBlock, endDataBlock, dataPath)
-	}
-
-	return dataHdr.blockSize, startDataBlock, endDataBlock, true, nil
-}
-
-func (m *Manager) locateDataRangeForKey(dataPath, key string) (blockSize int, startDataBlock, endDataBlock uint64, ok bool, err error) {
-	basePath := strings.TrimSuffix(dataPath, ".data")
-	indexPath := basePath + ".index"
-	summaryPath := basePath + ".summary"
-
-	dataHdr, err := m.readFileHeader(dataPath)
-	if err != nil {
-		return 0, 0, 0, false, err
-	}
-	if dataHdr.magic != m.dataMagic {
-		return 0, 0, 0, false, fmt.Errorf("invalid data magic in %s", dataPath)
-	}
-
-	indexHdr, err := m.readFileHeader(indexPath)
-	if err != nil {
-		return 0, 0, 0, false, err
-	}
-	if indexHdr.magic != m.indexMagic {
-		return 0, 0, 0, false, fmt.Errorf("invalid index magic in %s", indexPath)
-	}
-
-	summaryHdr, err := m.readFileHeader(summaryPath)
-	if err != nil {
-		return 0, 0, 0, false, err
-	}
-	if summaryHdr.magic != m.summMagic {
-		return 0, 0, 0, false, fmt.Errorf("invalid summary magic in %s", summaryPath)
-	}
-
-	summ, err := m.readSummaryMeta(summaryPath, summaryHdr.blockSize, key)
-	if err != nil {
-		return 0, 0, 0, false, err
-	}
-	if summ.minKey != "" && key < summ.minKey {
-		return 0, 0, 0, false, nil
-	}
-	if summ.maxKey != "" && key > summ.maxKey {
-		return 0, 0, 0, false, nil
-	}
-
-	startIndexBlock := uint64(0)
-	if len(summ.entries) > 0 {
-		startIndexBlock = summ.entries[len(summ.entries)-1].indexBlockNo
-	}
-
-	indexEntries, err := m.readIndexEntriesFromBlock(indexPath, indexHdr.blockSize, startIndexBlock, key)
-	if err != nil {
-		return 0, 0, 0, false, err
-	}
-	if len(indexEntries) == 0 {
-		return 0, 0, 0, false, nil
-	}
-
-	startDataBlock = indexEntries[len(indexEntries)-1].dataBlockNo
 
 	endDataBlock, err = m.countBlocks(dataPath, dataHdr.blockSize)
 	if err != nil {
@@ -890,59 +895,6 @@ func checkedChunkLen(n uint64, available int, what string) (int, error) {
 	return int(n), nil
 }
 
-func (m *Manager) listDataFilesNewestFirst() ([]string, error) {
-	pattern := filepath.Join(m.dir, "sst_*.data")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil, err
-	}
-
-	type candidate struct {
-		path string
-		ts   int64
-		name string
-	}
-	files := make([]candidate, 0, len(matches))
-	for _, dataPath := range matches {
-		base := strings.TrimSuffix(dataPath, ".data")
-		if _, err := os.Stat(base + ".index"); err != nil {
-			continue
-		}
-		if _, err := os.Stat(base + ".summary"); err != nil {
-			continue
-		}
-
-		name := filepath.Base(dataPath)
-		files = append(files, candidate{
-			path: dataPath,
-			ts:   parseSSTTimestamp(name),
-			name: name,
-		})
-	}
-
-	sort.Slice(files, func(i, j int) bool {
-		if files[i].ts != files[j].ts {
-			return files[i].ts > files[j].ts
-		}
-		return files[i].name > files[j].name
-	})
-
-	out := make([]string, 0, len(files))
-	for _, f := range files {
-		out = append(out, f.path)
-	}
-	return out, nil
-}
-
-func parseSSTTimestamp(fileName string) int64 {
-	trimmed := strings.TrimSuffix(strings.TrimPrefix(fileName, "sst_"), ".data")
-	v, err := strconv.ParseInt(trimmed, 10, 64)
-	if err != nil {
-		return 0
-	}
-	return v
-}
-
 func isExpired(rec model.Record, now uint64) bool {
 	return rec.ExpiresAt > 0 && rec.ExpiresAt <= now
 }
@@ -975,7 +927,7 @@ func (m *Manager) ListDataFilesInDir(dir string) ([]string, error) {
 		name := filepath.Base(dataPath)
 		files = append(files, candidate{
 			path: dataPath,
-			ts:   parseSSTTimestamp(name),
+			ts:   parseSSTTimestampFromBase(name),
 			name: name,
 		})
 	}
