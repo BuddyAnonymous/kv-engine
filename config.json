@@ -17,5 +17,7 @@
   "cms_delta": 0.01,
   "cms_seed": 0,
   "hll_precision": 14,
-  "hll_seed": 0
+  "hll_seed": 0,
+  "token_bucket_tokens": 100,
+  "token_bucket_interval_ms": 1000
 }

@@ -13,6 +13,7 @@ import (
 	"kv-engine/internal/config"
 	"kv-engine/internal/memtable"
 	"kv-engine/internal/model"
+	"kv-engine/internal/ratelimit"
 	"kv-engine/internal/sstable"
 	"kv-engine/internal/wal"
 
@@ -27,8 +28,18 @@ type Engine struct {
 	wal *wal.WALManager
 	mem memtable.MemtableManagerIface
 	sst sstable.ManagerIface
+	rl  *ratelimit.TokenBucket
 	seq uint64
+
+	// Test hooks (nil in production).
+	testHookAfterTokenBucketSync func() error
+	testHookAfterBatchSync       func() error
 }
+
+const (
+	tokenBucketStateKey = "__sys__:token_bucket_state"
+	internalKeyPrefix   = "__sys__:"
+)
 
 type KVPair struct {
 	Key   string
@@ -77,10 +88,125 @@ func New(cfg config.Config) (*Engine, error) {
 		e.seq = maxProbMetaSeq
 	}
 
+	if err := e.initTokenBucket(); err != nil {
+		return nil, err
+	}
+
 	return e, nil
 }
 
+func isInternalKey(key string) bool {
+	return strings.HasPrefix(key, internalKeyPrefix)
+}
+
+func (e *Engine) applyRecordToMem(rec model.Record) error {
+	var (
+		flushNeeded bool
+		err         error
+	)
+	if rec.Kind == model.RecordKindKV && rec.Tombstone {
+		flushNeeded, err = e.mem.Delete(rec)
+	} else {
+		flushNeeded, err = e.mem.Put(rec)
+	}
+	if err != nil {
+		return err
+	}
+	if flushNeeded {
+		return e.flushMemtable()
+	}
+	return nil
+}
+
+func (e *Engine) getRaw(key string) ([]byte, bool, error) {
+	now := uint64(time.Now().Unix())
+	r := e.mem.Get(key)
+	if r.Found {
+		if r.Tombstone || (r.ExpiresAt > 0 && r.ExpiresAt <= now) {
+			return nil, false, nil
+		}
+		return r.Value, true, nil
+	}
+	return e.sst.Get(key)
+}
+
+func (e *Engine) initTokenBucket() error {
+	capacity := e.cfg.TokenBucketTokens
+	interval := time.Duration(e.cfg.TokenBucketInterval) * time.Millisecond
+	bucket, err := ratelimit.New(capacity, interval, time.Now())
+	if err != nil {
+		return err
+	}
+	data, found, err := e.getRaw(tokenBucketStateKey)
+	if err != nil {
+		return err
+	}
+	if found {
+		if err := bucket.UnmarshalBinary(data); err != nil {
+			return err
+		}
+	}
+	e.rl = bucket
+	return nil
+}
+
+func (e *Engine) persistTokenBucketState() (bool, error) {
+	if e.rl == nil {
+		return false, nil
+	}
+	e.seq++
+	rec := model.Record{
+		Key:       tokenBucketStateKey,
+		Value:     e.rl.MarshalBinary(),
+		Tombstone: false,
+		Seq:       e.seq,
+		ExpiresAt: 0,
+		Kind:      model.RecordKindKV,
+		Structure: model.StructureTypeNone,
+		Op:        model.MergeOpNone,
+	}
+	if err := e.wal.Append(rec); err != nil {
+		return false, err
+	}
+	if err := e.wal.Sync(); err != nil {
+		return false, err
+	}
+	if e.testHookAfterTokenBucketSync != nil {
+		if err := e.testHookAfterTokenBucketSync(); err != nil {
+			return true, err
+		}
+	}
+	if err := e.applyRecordToMem(rec); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func (e *Engine) allowRequest(cost int64) error {
+	if e.rl == nil {
+		return nil
+	}
+	snap := e.rl.Snapshot()
+	if !e.rl.TryConsumeN(time.Now(), cost) {
+		return fmt.Errorf("rate limit exceeded")
+	}
+	durable, err := e.persistTokenBucketState()
+	if err != nil {
+		if !durable {
+			e.rl.Restore(snap)
+		}
+		return err
+	}
+	return nil
+}
+
 func (e *Engine) Put(key string, value []byte, ttl ...time.Duration) error {
+	if isInternalKey(key) {
+		return fmt.Errorf("internal key is not accessible")
+	}
+	if err := e.allowRequest(1); err != nil {
+		return err
+	}
 	e.seq++
 	var expiresAt uint64
 	if len(ttl) > 0 {
@@ -115,6 +241,15 @@ func (e *Engine) BatchWrite(pairs []KVPair, ttl ...time.Duration) error {
 		if strings.TrimSpace(p.Key) == "" {
 			return fmt.Errorf("batch contains empty key")
 		}
+		if isInternalKey(p.Key) {
+			return fmt.Errorf("internal key is not accessible")
+		}
+	}
+	if err := e.allowRequest(int64(len(pairs))); err != nil {
+		return err
+	}
+
+	for _, p := range pairs {
 		e.seq++
 		records = append(records, model.Record{
 			Key:       p.Key,
@@ -137,6 +272,12 @@ func (e *Engine) Merge(structure model.StructureType, key string, value []byte, 
 	}
 	if op != model.MergeOpAdd {
 		return fmt.Errorf("invalid merge op type")
+	}
+	if isInternalKey(key) {
+		return fmt.Errorf("internal key is not accessible")
+	}
+	if err := e.allowRequest(1); err != nil {
+		return err
 	}
 	meta, found, err := e.sst.GetLatestProbMeta(structure, key)
 	if err != nil {
@@ -173,6 +314,12 @@ func (e *Engine) BFCreate(key string) error {
 	if key == "" {
 		return fmt.Errorf("bf key is empty")
 	}
+	if isInternalKey(key) {
+		return fmt.Errorf("internal key is not accessible")
+	}
+	if err := e.allowRequest(1); err != nil {
+		return err
+	}
 	e.seq++
 	meta := model.ProbMetaRecord{
 		Structure:           model.StructureTypeBloomFilter,
@@ -189,6 +336,12 @@ func (e *Engine) BFCreate(key string) error {
 func (e *Engine) BFDelete(key string) error {
 	if key == "" {
 		return fmt.Errorf("bf key is empty")
+	}
+	if isInternalKey(key) {
+		return fmt.Errorf("internal key is not accessible")
+	}
+	if err := e.allowRequest(1); err != nil {
+		return err
 	}
 	e.seq++
 	meta := model.ProbMetaRecord{
@@ -208,6 +361,12 @@ func (e *Engine) CMSCreate(key string) error {
 	if key == "" {
 		return fmt.Errorf("cms key is empty")
 	}
+	if isInternalKey(key) {
+		return fmt.Errorf("internal key is not accessible")
+	}
+	if err := e.allowRequest(1); err != nil {
+		return err
+	}
 	e.seq++
 	meta := model.ProbMetaRecord{
 		Structure:  model.StructureTypeCountMinSketch,
@@ -224,6 +383,12 @@ func (e *Engine) CMSCreate(key string) error {
 func (e *Engine) CMSDelete(key string) error {
 	if key == "" {
 		return fmt.Errorf("cms key is empty")
+	}
+	if isInternalKey(key) {
+		return fmt.Errorf("internal key is not accessible")
+	}
+	if err := e.allowRequest(1); err != nil {
+		return err
 	}
 	e.seq++
 	meta := model.ProbMetaRecord{
@@ -243,6 +408,12 @@ func (e *Engine) HLLCreate(key string) error {
 	if key == "" {
 		return fmt.Errorf("hll key is empty")
 	}
+	if isInternalKey(key) {
+		return fmt.Errorf("internal key is not accessible")
+	}
+	if err := e.allowRequest(1); err != nil {
+		return err
+	}
 	e.seq++
 	meta := model.ProbMetaRecord{
 		Structure:    model.StructureTypeHyperLogLog,
@@ -259,6 +430,12 @@ func (e *Engine) HLLDelete(key string) error {
 	if key == "" {
 		return fmt.Errorf("hll key is empty")
 	}
+	if isInternalKey(key) {
+		return fmt.Errorf("internal key is not accessible")
+	}
+	if err := e.allowRequest(1); err != nil {
+		return err
+	}
 	e.seq++
 	meta := model.ProbMetaRecord{
 		Structure: model.StructureTypeHyperLogLog,
@@ -270,6 +447,12 @@ func (e *Engine) HLLDelete(key string) error {
 }
 
 func (e *Engine) BFGet(key string, value []byte) (bool, error) {
+	if isInternalKey(key) {
+		return false, fmt.Errorf("internal key is not accessible")
+	}
+	if err := e.allowRequest(1); err != nil {
+		return false, err
+	}
 	meta, found, err := e.sst.GetLatestProbMeta(model.StructureTypeBloomFilter, key)
 	if err != nil {
 		return false, err
@@ -291,6 +474,12 @@ func (e *Engine) BFGet(key string, value []byte) (bool, error) {
 }
 
 func (e *Engine) CMSGet(key string, value []byte) (uint64, error) {
+	if isInternalKey(key) {
+		return 0, fmt.Errorf("internal key is not accessible")
+	}
+	if err := e.allowRequest(1); err != nil {
+		return 0, err
+	}
 	meta, found, err := e.sst.GetLatestProbMeta(model.StructureTypeCountMinSketch, key)
 	if err != nil {
 		return 0, err
@@ -309,6 +498,12 @@ func (e *Engine) CMSGet(key string, value []byte) (uint64, error) {
 }
 
 func (e *Engine) HLLGet(key string) (uint64, error) {
+	if isInternalKey(key) {
+		return 0, fmt.Errorf("internal key is not accessible")
+	}
+	if err := e.allowRequest(1); err != nil {
+		return 0, err
+	}
 	meta, found, err := e.sst.GetLatestProbMeta(model.StructureTypeHyperLogLog, key)
 	if err != nil {
 		return 0, err
@@ -327,6 +522,12 @@ func (e *Engine) HLLGet(key string) (uint64, error) {
 }
 
 func (e *Engine) Delete(key string) error {
+	if isInternalKey(key) {
+		return fmt.Errorf("internal key is not accessible")
+	}
+	if err := e.allowRequest(1); err != nil {
+		return err
+	}
 	e.seq++
 	rec := model.Record{
 		Key:       key,
@@ -363,13 +564,22 @@ func (e *Engine) DeleteRange(startKey, endKey string) error {
 
 	keySet := make(map[string]struct{}, len(memKeys)+len(sstKeys))
 	for _, k := range memKeys {
+		if isInternalKey(k) {
+			continue
+		}
 		keySet[k] = struct{}{}
 	}
 	for _, k := range sstKeys {
+		if isInternalKey(k) {
+			continue
+		}
 		keySet[k] = struct{}{}
 	}
 	if len(keySet) == 0 {
-		return nil
+		return e.allowRequest(1)
+	}
+	if err := e.allowRequest(int64(len(keySet))); err != nil {
+		return err
 	}
 
 	keys := make([]string, 0, len(keySet))
@@ -396,19 +606,13 @@ func (e *Engine) DeleteRange(startKey, endKey string) error {
 }
 
 func (e *Engine) Get(key string) ([]byte, bool, error) {
-	now := uint64(time.Now().Unix())
-
-	// 1) Memtable
-	r := e.mem.Get(key)
-	if r.Found {
-		if r.Tombstone || (r.ExpiresAt > 0 && r.ExpiresAt <= now) {
-			return nil, false, nil
-		}
-		return r.Value, true, nil
+	if isInternalKey(key) {
+		return nil, false, fmt.Errorf("internal key is not accessible")
 	}
-
-	// 2) SSTable (L0 newest -> oldest)
-	val, found, err := e.sst.Get(key)
+	if err := e.allowRequest(1); err != nil {
+		return nil, false, err
+	}
+	val, found, err := e.getRaw(key)
 	if err != nil {
 		return nil, false, err
 	}
@@ -419,6 +623,9 @@ func (e *Engine) Get(key string) ([]byte, bool, error) {
 }
 
 func (e *Engine) ValidateMerkle(table string) (model.MerkleValidationResult, error) {
+	if err := e.allowRequest(1); err != nil {
+		return model.MerkleValidationResult{}, err
+	}
 	return e.sst.ValidateMerkle(table)
 }
 
@@ -496,23 +703,7 @@ func (e *Engine) ApplyRecord(rec model.Record, fromWAL bool) error {
 			return err
 		}
 	}
-
-	var (
-		flushNeeded bool
-		err         error
-	)
-	if rec.Kind == model.RecordKindKV && rec.Tombstone {
-		flushNeeded, err = e.mem.Delete(rec)
-	} else {
-		flushNeeded, err = e.mem.Put(rec)
-	}
-	if err != nil {
-		return err
-	}
-	if flushNeeded {
-		return e.flushMemtable()
-	}
-	return nil
+	return e.applyRecordToMem(rec)
 }
 
 func (e *Engine) applyBatchRecords(records []model.Record) error {
@@ -535,6 +726,11 @@ func (e *Engine) applyBatchRecords(records []model.Record) error {
 	// COMMIT must be durable before batch becomes visible in memtables.
 	if err := e.wal.Sync(); err != nil {
 		return err
+	}
+	if e.testHookAfterBatchSync != nil {
+		if err := e.testHookAfterBatchSync(); err != nil {
+			return err
+		}
 	}
 
 	return e.mem.ApplyBatchAtomically(records)

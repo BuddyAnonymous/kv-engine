@@ -29,6 +29,8 @@ type Config struct {
 	CMSSeed             uint32  `json:"cms_seed"`
 	HLLPrecision        uint8   `json:"hll_precision"`
 	HLLSeed             uint32  `json:"hll_seed"`
+	TokenBucketTokens   int64   `json:"token_bucket_tokens"`
+	TokenBucketInterval int64   `json:"token_bucket_interval_ms"`
 }
 
 func Default() Config {
@@ -53,6 +55,8 @@ func Default() Config {
 		CMSSeed:              0,
 		HLLPrecision:         14,
 		HLLSeed:              0,
+		TokenBucketTokens:    100,
+		TokenBucketInterval:  1000,
 	}
 }
 
@@ -140,6 +144,13 @@ func (c *Config) Normalize() {
 
 	if c.SegmentBlocks <= 0 {
 		c.SegmentBlocks = d.SegmentBlocks
+	}
+
+	if c.TokenBucketTokens <= 0 {
+		c.TokenBucketTokens = d.TokenBucketTokens
+	}
+	if c.TokenBucketInterval <= 0 {
+		c.TokenBucketInterval = d.TokenBucketInterval
 	}
 }
 
