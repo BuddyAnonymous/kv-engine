@@ -61,17 +61,35 @@ func (t *LSMTree) Flush(records []model.Record) error {
 
 // Get searches for a key through all levels (L0..Ln), newest first at each level.
 func (t *LSMTree) Get(key string) ([]byte, bool, error) {
+	rec, found, err := t.GetRecord(key)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return nil, false, nil
+	}
+	return rec.Value, true, nil
+}
+
+// GetRecord searches for the latest visible KV record through all levels (L0..Ln),
+// newest first at each level.
+// A tombstone/expired KV on a higher level hides all older levels.
+func (t *LSMTree) GetRecord(key string) (model.Record, bool, error) {
+	now := uint64(time.Now().Unix())
 	for lvl := 0; lvl < t.cfg.MaxLevels; lvl++ {
 		dir := t.levelDir(lvl)
-		val, found, err := t.sst.GetRecordFromDir(dir, key)
+		rec, found, err := t.sst.GetLatestKVRecordFromDir(dir, key)
 		if err != nil {
-			return nil, false, err
+			return model.Record{}, false, err
 		}
 		if found {
-			return val, true, nil
+			if rec.Tombstone || (rec.ExpiresAt > 0 && rec.ExpiresAt <= now) {
+				return model.Record{}, false, nil
+			}
+			return rec, true, nil
 		}
 	}
-	return nil, false, nil
+	return model.Record{}, false, nil
 }
 
 // GetMergeOperands collects merge operands from all levels.
@@ -97,6 +115,26 @@ func (t *LSMTree) GetMergeOperands(structure model.StructureType, key string) ([
 	})
 
 	return allOps, nil
+}
+
+// CollectAllRecords reads all records from every level and returns them in one slice.
+func (t *LSMTree) CollectAllRecords() ([]model.Record, error) {
+	out := make([]model.Record, 0)
+	for lvl := 0; lvl < t.cfg.MaxLevels; lvl++ {
+		dir := t.levelDir(lvl)
+		files, err := t.sst.ListDataFilesInDir(dir)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range files {
+			recs, err := t.sst.ReadAllRecordsFromFile(f)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, recs...)
+		}
+	}
+	return out, nil
 }
 
 // maybeCompact checks all levels and triggers compaction when thresholds are exceeded.

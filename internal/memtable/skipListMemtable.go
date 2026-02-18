@@ -159,11 +159,7 @@ func (m *SkipListMemtable) IsFull() bool {
 }
 
 func (m *SkipListMemtable) DrainSorted() []model.Record {
-	out := make([]model.Record, 0, m.entriesNum)
-
-	for x := m.head.forward[0]; x != nil; x = x.forward[0] {
-		out = append(out, x.rec)
-	}
+	out := m.SnapshotSorted()
 	out = append(out, m.mergeOps...)
 	sortRecordsForFlush(out)
 
@@ -174,6 +170,16 @@ func (m *SkipListMemtable) DrainSorted() []model.Record {
 	m.entriesNum = 0
 	m.currentBytes = 0
 
+	return out
+}
+
+func (m *SkipListMemtable) SnapshotSorted() []model.Record {
+	out := make([]model.Record, 0, m.entriesNum-len(m.mergeOps))
+
+	for x := m.head.forward[0]; x != nil; x = x.forward[0] {
+		out = append(out, x.rec)
+	}
+	sortRecordsForFlush(out)
 	return out
 }
 

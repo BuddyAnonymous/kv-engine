@@ -258,6 +258,326 @@ func (m *Manager) maybeKeyInSingleFilter(singlePath string, footer singleFileFoo
 	return bf.MightContain([]byte(key)), nil
 }
 
+func (m *Manager) getLatestKVFromSingleFile(singlePath string, footer singleFileFooter, blockSize int, key string) (model.Record, bool, error) {
+	startDataBlock, endDataBlock, ok, err := m.locateSingleDataRangeForAllKeyRecords(singlePath, footer, blockSize, key)
+	if err != nil {
+		return model.Record{}, false, err
+	}
+	if !ok {
+		return model.Record{}, false, nil
+	}
+	return m.searchSingleDataRangeForLatestKV(singlePath, footer, blockSize, key, startDataBlock, endDataBlock)
+}
+
+func (m *Manager) locateSingleDataRangeForAllKeyRecords(singlePath string, footer singleFileFooter, blockSize int, key string) (startDataBlock, endDataBlock uint64, ok bool, err error) {
+	summ, err := m.readSingleSummaryMeta(singlePath, footer, blockSize, key)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if summ.minKey != "" && key < summ.minKey {
+		return 0, 0, false, nil
+	}
+	if summ.maxKey != "" && key > summ.maxKey {
+		return 0, 0, false, nil
+	}
+
+	startIndexBlock := uint64(0)
+	for _, se := range summ.entries {
+		if se.key < key {
+			startIndexBlock = se.indexBlockNo
+			continue
+		}
+		break
+	}
+
+	indexEntries, err := m.readSingleIndexEntriesFromBlock(singlePath, footer, blockSize, startIndexBlock, key)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if len(indexEntries) == 0 {
+		return 0, 0, false, nil
+	}
+
+	var (
+		hasPrev   bool
+		predBlock uint64
+	)
+	for _, ie := range indexEntries {
+		if ie.key < key {
+			hasPrev = true
+			predBlock = ie.dataBlockNo
+			continue
+		}
+		break
+	}
+
+	if hasPrev {
+		startDataBlock = predBlock
+	} else {
+		startDataBlock = 0
+	}
+
+	endDataBlock = footer.DataLen
+	if startDataBlock >= endDataBlock {
+		return 0, 0, false, fmt.Errorf("invalid single data block range [%d,%d) for %s", startDataBlock, endDataBlock, singlePath)
+	}
+	return startDataBlock, endDataBlock, true, nil
+}
+
+func (m *Manager) readSingleSummaryMeta(singlePath string, footer singleFileFooter, blockSize int, key string) (summaryMeta, error) {
+	if footer.SummaryLen == 0 {
+		return summaryMeta{}, fmt.Errorf("single file has empty summary section: %s", singlePath)
+	}
+
+	payload0, err := m.readPayloadBlock(singlePath, blockSize, footer.SummaryOffset)
+	if err != nil {
+		return summaryMeta{}, err
+	}
+	if len(payload0) < 8 {
+		return summaryMeta{}, fmt.Errorf("single summary header too short in %s", singlePath)
+	}
+	if string(payload0[:4]) != string(m.summMagic[:]) {
+		return summaryMeta{}, fmt.Errorf("invalid single summary magic in %s", singlePath)
+	}
+
+	off := 8
+	stride, err := readUvarintAt(payload0, &off)
+	if err != nil {
+		return summaryMeta{}, err
+	}
+	minLen, err := readUvarintAt(payload0, &off)
+	if err != nil {
+		return summaryMeta{}, err
+	}
+	minLenI, err := checkedChunkLen(minLen, len(payload0)-off, "single summary minKey")
+	if err != nil {
+		return summaryMeta{}, fmt.Errorf("single summary minKey out of bounds in %s", singlePath)
+	}
+	minKey := string(payload0[off : off+minLenI])
+	off += minLenI
+
+	maxLen, err := readUvarintAt(payload0, &off)
+	if err != nil {
+		return summaryMeta{}, err
+	}
+	maxLenI, err := checkedChunkLen(maxLen, len(payload0)-off, "single summary maxKey")
+	if err != nil {
+		return summaryMeta{}, fmt.Errorf("single summary maxKey out of bounds in %s", singlePath)
+	}
+	maxKey := string(payload0[off : off+maxLenI])
+	off += maxLenI
+
+	if key != "" {
+		if (minKey != "" && key < minKey) || (maxKey != "" && key > maxKey) {
+			return summaryMeta{
+				stride:  stride,
+				minKey:  minKey,
+				maxKey:  maxKey,
+				entries: nil,
+			}, nil
+		}
+	}
+
+	entries, err := decodeSummaryEntries(payload0, off, key)
+	if err != nil {
+		return summaryMeta{}, err
+	}
+
+	for i := uint64(1); i < footer.SummaryLen; i++ {
+		payload, err := m.readPayloadBlock(singlePath, blockSize, footer.SummaryOffset+i)
+		if err != nil {
+			return summaryMeta{}, err
+		}
+		es, err := decodeSummaryEntries(payload, 0, key)
+		if err != nil {
+			return summaryMeta{}, err
+		}
+		entries = append(entries, es...)
+	}
+
+	return summaryMeta{
+		stride:  stride,
+		minKey:  minKey,
+		maxKey:  maxKey,
+		entries: entries,
+	}, nil
+}
+
+func (m *Manager) readSingleIndexEntriesFromBlock(singlePath string, footer singleFileFooter, blockSize int, startBlock uint64, targetKey string) ([]indexEntry, error) {
+	if footer.IndexLen == 0 || startBlock >= footer.IndexLen {
+		return nil, nil
+	}
+
+	out := make([]indexEntry, 0)
+	for relBlock := startBlock; relBlock < footer.IndexLen; relBlock++ {
+		payload, err := m.readPayloadBlock(singlePath, blockSize, footer.IndexOffset+relBlock)
+		if err != nil {
+			return nil, err
+		}
+
+		off := 0
+		if relBlock == 0 {
+			if len(payload) < 8 {
+				return nil, fmt.Errorf("single index header too short in %s", singlePath)
+			}
+			if string(payload[:4]) != string(m.indexMagic[:]) {
+				return nil, fmt.Errorf("invalid single index magic in %s", singlePath)
+			}
+			off = 8
+		}
+
+		prevKey := ""
+		for off < len(payload) {
+			shared, err := readUvarintAt(payload, &off)
+			if err != nil {
+				return nil, err
+			}
+			suffixLen, err := readUvarintAt(payload, &off)
+			if err != nil {
+				return nil, err
+			}
+			if shared > uint64(len(prevKey)) {
+				return nil, fmt.Errorf("single index shared prefix out of range")
+			}
+			sharedI := int(shared)
+			suffixLenI, err := checkedChunkLen(suffixLen, len(payload)-off, "single index suffix")
+			if err != nil {
+				return nil, fmt.Errorf("single index suffix out of bounds")
+			}
+
+			suffix := string(payload[off : off+suffixLenI])
+			off += suffixLenI
+			key := prevKey[:sharedI] + suffix
+
+			dataBlockNo, err := readUvarintAt(payload, &off)
+			if err != nil {
+				return nil, err
+			}
+
+			if targetKey != "" && key > targetKey {
+				return out, nil
+			}
+
+			out = append(out, indexEntry{
+				key:         key,
+				dataBlockNo: dataBlockNo,
+			})
+			prevKey = key
+		}
+	}
+	return out, nil
+}
+
+func (m *Manager) searchSingleDataRangeForLatestKV(singlePath string, footer singleFileFooter, blockSize int, key string, startBlock, endBlock uint64) (model.Record, bool, error) {
+	prevKey := ""
+	var pending []byte
+	var (
+		best  model.Record
+		found bool
+	)
+
+	for relBlock := startBlock; relBlock < endBlock; relBlock++ {
+		payload, err := m.readPayloadBlock(singlePath, blockSize, footer.DataOffset+relBlock)
+		if err != nil {
+			return model.Record{}, false, err
+		}
+
+		off := 0
+		if relBlock == 0 {
+			if len(payload) < 8 {
+				return model.Record{}, false, fmt.Errorf("single data header too short in %s", singlePath)
+			}
+			if string(payload[:4]) != string(m.dataMagic[:]) {
+				return model.Record{}, false, fmt.Errorf("invalid single data magic in %s", singlePath)
+			}
+			off = 8
+		}
+
+		for off < len(payload) {
+			flags := payload[off]
+			fragType := flags & fragTypeMask
+
+			if len(pending) == 0 {
+				switch fragType {
+				case 0b00:
+					rec, consumed, err := decodeDataRecord(payload[off:], prevKey)
+					if err != nil {
+						return model.Record{}, false, err
+					}
+					off += consumed
+					prevKey = rec.Key
+
+					if rec.Key == key {
+						if rec.Kind == model.RecordKindKV && (!found || rec.Seq > best.Seq) {
+							best = rec
+							found = true
+						}
+						continue
+					}
+					if rec.Key > key {
+						return best, found, nil
+					}
+
+				case 0b10:
+					pending = append(pending, payload[off:]...)
+					off = len(payload)
+
+				case 0b01, 0b11:
+					return model.Record{}, false, fmt.Errorf("unexpected continuation fragment in %s block %d", singlePath, footer.DataOffset+relBlock)
+
+				default:
+					return model.Record{}, false, fmt.Errorf("unknown fragment flag %d in %s block %d", fragType, singlePath, footer.DataOffset+relBlock)
+				}
+				continue
+			}
+
+			if fragType != 0b01 && fragType != 0b11 {
+				return model.Record{}, false, fmt.Errorf("expected continuation fragment in %s block %d", singlePath, footer.DataOffset+relBlock)
+			}
+
+			off++
+			chunkLen, err := readUvarintAt(payload, &off)
+			if err != nil {
+				return model.Record{}, false, err
+			}
+			chunkLenI, err := checkedChunkLen(chunkLen, len(payload)-off, "fragment chunk")
+			if err != nil {
+				return model.Record{}, false, fmt.Errorf("fragment chunk out of bounds in %s block %d", singlePath, footer.DataOffset+relBlock)
+			}
+			pending = append(pending, payload[off:off+chunkLenI]...)
+			off += chunkLenI
+
+			if fragType == 0b01 {
+				rec, consumed, err := decodeDataRecord(pending, prevKey)
+				if err != nil {
+					return model.Record{}, false, err
+				}
+				if consumed != len(pending) {
+					return model.Record{}, false, fmt.Errorf("fragment assembly has extra bytes in %s block %d", singlePath, footer.DataOffset+relBlock)
+				}
+				pending = pending[:0]
+				prevKey = rec.Key
+
+				if rec.Key == key {
+					if rec.Kind == model.RecordKindKV && (!found || rec.Seq > best.Seq) {
+						best = rec
+						found = true
+					}
+					continue
+				}
+				if rec.Key > key {
+					return best, found, nil
+				}
+			}
+		}
+	}
+
+	if len(pending) != 0 {
+		return model.Record{}, false, fmt.Errorf("unterminated fragmented record in %s", singlePath)
+	}
+	return best, found, nil
+}
+
 func (m *Manager) scanSingleDataSection(singlePath string, blockSize int, footer singleFileFooter, onRec func(model.Record) (bool, error)) error {
 	prevKey := ""
 	var pending []byte

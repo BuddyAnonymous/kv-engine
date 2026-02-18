@@ -77,6 +77,23 @@ func (m *MemtableManager) GetMergeOperands(structure model.StructureType, key st
 	return out
 }
 
+func (m *MemtableManager) SnapshotSorted() []model.Record {
+	out := make([]model.Record, 0)
+
+	// Active is newest, then RO tables from newest to oldest.
+	if m.active >= 0 && m.active < len(m.tables) && m.tables[m.active] != nil {
+		out = append(out, m.tables[m.active].SnapshotSorted()...)
+	}
+	for i := len(m.roQueue) - 1; i >= 0; i-- {
+		idx := m.roQueue[i]
+		if idx >= 0 && idx < len(m.tables) && m.tables[idx] != nil {
+			out = append(out, m.tables[idx].SnapshotSorted()...)
+		}
+	}
+
+	return out
+}
+
 // Put/Delete vracaju flushNeeded=true kad je active postala puna i nema slobodnog slota (tj. popunili smo svih N).
 func (m *MemtableManager) Put(r model.Record) (bool, error) {
 	m.tables[m.active].Put(r)

@@ -134,4 +134,21 @@ func (m *HashMapMemtable) DrainSorted() []model.Record {
 	return out
 }
 
+func (m *HashMapMemtable) SnapshotSorted() []model.Record {
+	keys := make([]string, 0, len(m.data))
+	for k := range m.data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	out := make([]model.Record, 0, len(m.data))
+	for _, k := range keys {
+		if rec, ok := m.data[k]; ok {
+			out = append(out, rec)
+		}
+	}
+	sortRecordsForFlush(out)
+	return out
+}
+
 var _ Memtable = (*HashMapMemtable)(nil)

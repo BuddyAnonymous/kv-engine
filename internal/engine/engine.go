@@ -32,6 +32,9 @@ type Engine struct {
 	lsm        *lsm.LSMTree
 	seq        uint64
 	cacheEpoch uint64
+
+	iterators      map[uint64]*scanIterator
+	nextIteratorID uint64
 }
 
 func New(cfg config.Config) (*Engine, error) {
@@ -76,6 +79,7 @@ func New(cfg config.Config) (*Engine, error) {
 		sst:        sstMgr,
 		lsm:        lsmTree,
 		cacheEpoch: 1,
+		iterators:  make(map[uint64]*scanIterator),
 	}
 
 	// Inicijalizuj WAL sa engine-om kao applier (replay se desava unutar NewWALManager)
@@ -100,6 +104,10 @@ func New(cfg config.Config) (*Engine, error) {
 }
 
 func (e *Engine) Put(key string, value []byte, ttl ...time.Duration) error {
+	if isInternalSystemKey(key) {
+		return fmt.Errorf("reserved internal key")
+	}
+
 	e.seq++
 	var expiresAt uint64
 	if len(ttl) > 0 {
@@ -357,6 +365,10 @@ func (e *Engine) HLLGet(key string) (uint64, error) {
 }
 
 func (e *Engine) Delete(key string) error {
+	if isInternalSystemKey(key) {
+		return fmt.Errorf("reserved internal key")
+	}
+
 	e.seq++
 	rec := model.Record{
 		Key:       key,
@@ -373,6 +385,10 @@ func (e *Engine) Delete(key string) error {
 }
 
 func (e *Engine) Get(key string) ([]byte, bool, error) {
+	if isInternalSystemKey(key) {
+		return nil, false, nil
+	}
+
 	if val, ok := e.getKVFromCache(key); ok {
 		return val, true, nil
 	}
@@ -391,7 +407,7 @@ func (e *Engine) Get(key string) ([]byte, bool, error) {
 	}
 
 	// 2) SSTable (all levels via LSM tree)
-	val, found, err := e.lsm.Get(key)
+	rec, found, err := e.lsm.GetRecord(key)
 	if err != nil {
 		return nil, false, err
 	}
@@ -399,8 +415,8 @@ func (e *Engine) Get(key string) ([]byte, bool, error) {
 		e.invalidateKVCache(key)
 		return nil, false, nil
 	}
-	e.putKVToCache(key, val, 0, 0)
-	return val, true, nil
+	e.putKVToCache(key, rec.Value, rec.Seq, rec.ExpiresAt)
+	return rec.Value, true, nil
 }
 
 func (e *Engine) ValidateMerkle(table string) (model.MerkleValidationResult, error) {

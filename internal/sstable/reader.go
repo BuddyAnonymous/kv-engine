@@ -62,33 +62,17 @@ func (m *Manager) Get(key string) ([]byte, bool, error) {
 			if !maybeInFilter {
 				continue
 			}
-			var (
-				best  model.Record
-				found bool
-			)
-			err = m.scanSingleDataSection(singlePath, blockSize, footer, func(rec model.Record) (bool, error) {
-				if rec.Key == key {
-					if rec.Kind == model.RecordKindKV && (!found || rec.Seq > best.Seq) {
-						best = rec
-						found = true
-					}
-					return false, nil
-				}
-				if rec.Key > key {
-					return true, nil
-				}
-				return false, nil
-			})
+			rec, found, err := m.getLatestKVFromSingleFile(singlePath, footer, blockSize, key)
 			if err != nil {
 				return nil, false, err
 			}
 			if !found {
 				continue
 			}
-			if best.Tombstone || isExpired(best, now) {
+			if rec.Tombstone || isExpired(rec, now) {
 				return nil, false, nil
 			}
-			return best.Value, true, nil
+			return rec.Value, true, nil
 
 		case tocModeMulti:
 			dataPath := tbl.basePath + ".data"
@@ -946,21 +930,22 @@ func (m *Manager) ListDataFilesInDir(dir string) ([]string, error) {
 	return out, nil
 }
 
-// GetRecordFromDir searches for a key across all SSTables in the given directory (newest first).
-func (m *Manager) GetRecordFromDir(dir string, key string) ([]byte, bool, error) {
+// GetLatestKVRecordFromDir searches for the latest KV record for a key
+// across all SSTables in the given directory (newest first).
+// It returns the newest KV record even when it is tombstoned/expired.
+func (m *Manager) GetLatestKVRecordFromDir(dir string, key string) (model.Record, bool, error) {
 	dataFiles, err := m.ListDataFilesInDir(dir)
 	if err != nil {
-		return nil, false, err
+		return model.Record{}, false, err
 	}
 	if len(dataFiles) == 0 {
-		return nil, false, nil
+		return model.Record{}, false, nil
 	}
 
-	now := uint64(time.Now().Unix())
 	for _, dataPath := range dataFiles {
 		maybeInFilter, err := m.maybeKeyInFilter(dataPath, key)
 		if err != nil {
-			return nil, false, err
+			return model.Record{}, false, err
 		}
 		if !maybeInFilter {
 			continue
@@ -968,18 +953,31 @@ func (m *Manager) GetRecordFromDir(dir string, key string) ([]byte, bool, error)
 
 		rec, found, err := m.getLatestKVFromDataFile(dataPath, key)
 		if err != nil {
-			return nil, false, err
+			return model.Record{}, false, err
 		}
 		if !found {
 			continue
 		}
-		if rec.Tombstone || isExpired(rec, now) {
-			return nil, false, nil
-		}
-		return rec.Value, true, nil
+		return rec, true, nil
 	}
 
-	return nil, false, nil
+	return model.Record{}, false, nil
+}
+
+// GetRecordFromDir searches for a key across all SSTables in the given directory (newest first).
+func (m *Manager) GetRecordFromDir(dir string, key string) ([]byte, bool, error) {
+	rec, found, err := m.GetLatestKVRecordFromDir(dir, key)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return nil, false, nil
+	}
+	now := uint64(time.Now().Unix())
+	if rec.Tombstone || isExpired(rec, now) {
+		return nil, false, nil
+	}
+	return rec.Value, true, nil
 }
 
 // GetMergeOperandsFromDir collects merge operands from all SSTables in the given directory.
