@@ -238,6 +238,12 @@ func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, 
 						}
 						inBatch = true
 						pendingBatch = pendingBatch[:0]
+					} else if IsBatchAbortOpType(record.OpType) {
+						if !inBatch {
+							return -1, -1, fmt.Errorf("batch abort without begin in WAL replay"), 0
+						}
+						pendingBatch = pendingBatch[:0]
+						inBatch = false
 					} else {
 						if !inBatch {
 							return -1, -1, fmt.Errorf("batch commit without begin in WAL replay"), 0
@@ -413,6 +419,10 @@ func (m *WALManager) AppendBatchBegin() error {
 
 func (m *WALManager) AppendBatchCommit() error {
 	return m.Write(0, 0, BatchCommitOpType(), nil, nil)
+}
+
+func (m *WALManager) AppendBatchAbort() error {
+	return m.Write(0, 0, BatchAbortOpType(), nil, nil)
 }
 
 func (m *WALManager) Sync() error {

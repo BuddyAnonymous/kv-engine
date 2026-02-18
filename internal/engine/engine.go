@@ -23,16 +23,21 @@ import (
 )
 
 type Engine struct {
-	cfg config.Config
-	bm  *block.BlockManager
-	wal *wal.WALManager
-	mem memtable.MemtableManagerIface
-	sst sstable.ManagerIface
-	rl  *ratelimit.TokenBucket
-	seq uint64
+	cfg     config.Config
+	bm      *block.BlockManager
+	wal     *wal.WALManager
+	mem     memtable.MemtableManagerIface
+	sst     sstable.ManagerIface
+	rl      *ratelimit.TokenBucket
+	seq     uint64
+	history map[string][]model.Record
+
+	snapshots   map[string]snapshotPoint
+	snapshotCtr uint64
 
 	// Test hooks (nil in production).
 	testHookAfterTokenBucketSync func() error
+	testHookAfterBatchBegin      func() error
 	testHookAfterBatchSync       func() error
 }
 
@@ -44,6 +49,11 @@ const (
 type KVPair struct {
 	Key   string
 	Value []byte
+}
+
+type snapshotPoint struct {
+	Seq           uint64
+	CreatedAtUnix uint64
 }
 
 func New(cfg config.Config) (*Engine, error) {
@@ -64,10 +74,12 @@ func New(cfg config.Config) (*Engine, error) {
 	bm := block.NewBlockManager(cfg.CacheSize)
 
 	e := &Engine{
-		cfg: cfg,
-		bm:  bm,
-		mem: mem,
-		sst: sstable.New(filepath.Join(cfg.DataDir, "sstable", "level0"), cfg.MultiFileSSTable, bm, cfg.BlockSize, uint64(cfg.SummaryStride)),
+		cfg:       cfg,
+		bm:        bm,
+		mem:       mem,
+		sst:       sstable.New(filepath.Join(cfg.DataDir, "sstable", "level0"), cfg.MultiFileSSTable, bm, cfg.BlockSize, uint64(cfg.SummaryStride)),
+		history:   make(map[string][]model.Record),
+		snapshots: make(map[string]snapshotPoint),
 	}
 
 	// Inicijalizuj WAL sa engine-om kao applier (replay se desava unutar NewWALManager)
@@ -97,6 +109,52 @@ func New(cfg config.Config) (*Engine, error) {
 
 func isInternalKey(key string) bool {
 	return strings.HasPrefix(key, internalKeyPrefix)
+}
+
+func (e *Engine) appendHistory(rec model.Record) {
+	if rec.Key == "" {
+		return
+	}
+	if isInternalKey(rec.Key) {
+		return
+	}
+	e.history[rec.Key] = append(e.history[rec.Key], rec)
+}
+
+func (e *Engine) captureBaselineIfNeeded(key string, beforeSeq uint64) (model.Record, bool, error) {
+	if key == "" || isInternalKey(key) {
+		return model.Record{}, false, nil
+	}
+	if len(e.history[key]) > 0 {
+		return model.Record{}, false, nil
+	}
+	val, found, err := e.getRaw(key)
+	if err != nil {
+		return model.Record{}, false, err
+	}
+	if found {
+		return model.Record{
+			Key:       key,
+			Value:     append([]byte(nil), val...),
+			Tombstone: false,
+			Seq:       beforeSeq,
+			ExpiresAt: 0,
+			Kind:      model.RecordKindKV,
+			Structure: model.StructureTypeNone,
+			Op:        model.MergeOpNone,
+		}, true, nil
+	}
+	// Baseline "none" marker as tombstone snapshot state.
+	return model.Record{
+		Key:       key,
+		Value:     nil,
+		Tombstone: true,
+		Seq:       beforeSeq,
+		ExpiresAt: 0,
+		Kind:      model.RecordKindKV,
+		Structure: model.StructureTypeNone,
+		Op:        model.MergeOpNone,
+	}, true, nil
 }
 
 func (e *Engine) applyRecordToMem(rec model.Record) error {
@@ -200,6 +258,31 @@ func (e *Engine) allowRequest(cost int64) error {
 	return nil
 }
 
+func (e *Engine) withRateLimitRollbackOnError(cost int64, op func() error) error {
+	if e.rl == nil {
+		return op()
+	}
+	snap := e.rl.Snapshot()
+	if !e.rl.TryConsumeN(time.Now(), cost) {
+		return fmt.Errorf("rate limit exceeded")
+	}
+	durable, err := e.persistTokenBucketState()
+	if err != nil {
+		if !durable {
+			e.rl.Restore(snap)
+		}
+		return err
+	}
+	if err := op(); err != nil {
+		e.rl.Restore(snap)
+		if _, rbErr := e.persistTokenBucketState(); rbErr != nil {
+			return fmt.Errorf("%v; token rollback failed: %w", err, rbErr)
+		}
+		return err
+	}
+	return nil
+}
+
 func (e *Engine) Put(key string, value []byte, ttl ...time.Duration) error {
 	if isInternalKey(key) {
 		return fmt.Errorf("internal key is not accessible")
@@ -245,10 +328,6 @@ func (e *Engine) BatchWrite(pairs []KVPair, ttl ...time.Duration) error {
 			return fmt.Errorf("internal key is not accessible")
 		}
 	}
-	if err := e.allowRequest(int64(len(pairs))); err != nil {
-		return err
-	}
-
 	for _, p := range pairs {
 		e.seq++
 		records = append(records, model.Record{
@@ -263,7 +342,9 @@ func (e *Engine) BatchWrite(pairs []KVPair, ttl ...time.Duration) error {
 		})
 	}
 
-	return e.applyBatchRecords(records)
+	return e.withRateLimitRollbackOnError(int64(len(pairs)), func() error {
+		return e.applyBatchRecords(records)
+	})
 }
 
 func (e *Engine) Merge(structure model.StructureType, key string, value []byte, op model.MergeOpType, ttl ...time.Duration) error {
@@ -578,9 +659,6 @@ func (e *Engine) DeleteRange(startKey, endKey string) error {
 	if len(keySet) == 0 {
 		return e.allowRequest(1)
 	}
-	if err := e.allowRequest(int64(len(keySet))); err != nil {
-		return err
-	}
 
 	keys := make([]string, 0, len(keySet))
 	for k := range keySet {
@@ -602,7 +680,9 @@ func (e *Engine) DeleteRange(startKey, endKey string) error {
 			Op:        model.MergeOpNone,
 		})
 	}
-	return e.applyBatchRecords(records)
+	return e.withRateLimitRollbackOnError(int64(len(keySet)), func() error {
+		return e.applyBatchRecords(records)
+	})
 }
 
 func (e *Engine) Get(key string) ([]byte, bool, error) {
@@ -627,6 +707,62 @@ func (e *Engine) ValidateMerkle(table string) (model.MerkleValidationResult, err
 		return model.MerkleValidationResult{}, err
 	}
 	return e.sst.ValidateMerkle(table)
+}
+
+func (e *Engine) SnapshotCreate(name ...string) (string, error) {
+	id := ""
+	if len(name) > 0 {
+		id = strings.TrimSpace(name[0])
+		if id == "" {
+			return "", fmt.Errorf("snapshot name must not be empty")
+		}
+	} else {
+		e.snapshotCtr++
+		id = fmt.Sprintf("snap-%d", e.snapshotCtr)
+	}
+	if _, exists := e.snapshots[id]; exists {
+		return "", fmt.Errorf("snapshot %s already exists", id)
+	}
+	if err := e.allowRequest(1); err != nil {
+		return "", err
+	}
+	e.snapshots[id] = snapshotPoint{
+		Seq:           e.seq,
+		CreatedAtUnix: uint64(time.Now().Unix()),
+	}
+	return id, nil
+}
+
+func (e *Engine) SnapshotGet(snapshotID, key string) ([]byte, bool, error) {
+	if isInternalKey(key) {
+		return nil, false, fmt.Errorf("internal key is not accessible")
+	}
+	snap, ok := e.snapshots[snapshotID]
+	if !ok {
+		return nil, false, fmt.Errorf("snapshot %s not found", snapshotID)
+	}
+	if err := e.allowRequest(1); err != nil {
+		return nil, false, err
+	}
+	h := e.history[key]
+	for i := len(h) - 1; i >= 0; i-- {
+		rec := h[i]
+		if rec.Seq > snap.Seq {
+			continue
+		}
+		if rec.Tombstone {
+			return nil, false, nil
+		}
+		if rec.ExpiresAt > 0 && rec.ExpiresAt <= snap.CreatedAtUnix {
+			return nil, false, nil
+		}
+		return rec.Value, true, nil
+	}
+	if len(h) == 0 {
+		// Key has not changed in current process lifetime.
+		return e.getRaw(key)
+	}
+	return nil, false, nil
 }
 
 func (e *Engine) flushMemtable() error {
@@ -703,26 +839,57 @@ func (e *Engine) ApplyRecord(rec model.Record, fromWAL bool) error {
 			return err
 		}
 	}
-	return e.applyRecordToMem(rec)
+	baseline, hasBaseline, err := e.captureBaselineIfNeeded(rec.Key, rec.Seq-1)
+	if err != nil {
+		return err
+	}
+	if err := e.applyRecordToMem(rec); err != nil {
+		return err
+	}
+	if hasBaseline {
+		e.appendHistory(baseline)
+	}
+	e.appendHistory(rec)
+	return nil
 }
 
 func (e *Engine) applyBatchRecords(records []model.Record) error {
 	if len(records) == 0 {
 		return nil
 	}
+	if err := e.mem.CanApplyBatchAtomically(records); err != nil {
+		return err
+	}
+	inBatch := false
+	committed := false
 
 	// WAL transactional envelope: BEGIN + records + COMMIT.
 	if err := e.wal.AppendBatchBegin(); err != nil {
 		return err
 	}
+	inBatch = true
+	if e.testHookAfterBatchBegin != nil {
+		if err := e.testHookAfterBatchBegin(); err != nil {
+			_ = e.wal.AppendBatchAbort()
+			_ = e.wal.Sync()
+			return err
+		}
+	}
 	for _, rec := range records {
 		if err := e.wal.Append(rec); err != nil {
+			_ = e.wal.AppendBatchAbort()
+			_ = e.wal.Sync()
 			return err
 		}
 	}
 	if err := e.wal.AppendBatchCommit(); err != nil {
+		if inBatch && !committed {
+			_ = e.wal.AppendBatchAbort()
+			_ = e.wal.Sync()
+		}
 		return err
 	}
+	committed = true
 	// COMMIT must be durable before batch becomes visible in memtables.
 	if err := e.wal.Sync(); err != nil {
 		return err
@@ -733,5 +900,34 @@ func (e *Engine) applyBatchRecords(records []model.Record) error {
 		}
 	}
 
-	return e.mem.ApplyBatchAtomically(records)
+	firstSeqByKey := make(map[string]uint64)
+	for _, rec := range records {
+		if rec.Key == "" || isInternalKey(rec.Key) {
+			continue
+		}
+		if seq, ok := firstSeqByKey[rec.Key]; !ok || rec.Seq < seq {
+			firstSeqByKey[rec.Key] = rec.Seq
+		}
+	}
+	baselines := make([]model.Record, 0, len(firstSeqByKey))
+	for key, firstSeq := range firstSeqByKey {
+		baseline, ok, err := e.captureBaselineIfNeeded(key, firstSeq-1)
+		if err != nil {
+			return err
+		}
+		if ok {
+			baselines = append(baselines, baseline)
+		}
+	}
+
+	if err := e.mem.ApplyBatchAtomically(records); err != nil {
+		return err
+	}
+	for _, rec := range baselines {
+		e.appendHistory(rec)
+	}
+	for _, rec := range records {
+		e.appendHistory(rec)
+	}
+	return nil
 }

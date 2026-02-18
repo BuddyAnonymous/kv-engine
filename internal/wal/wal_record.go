@@ -16,6 +16,7 @@ const (
 const (
 	batchControlMask byte = 1 << 5
 	batchBeginMask   byte = 1 << 6
+	batchAbortMask   byte = 1 << 7
 )
 
 // Bit layout za OpType (1 byte):
@@ -52,12 +53,24 @@ func BatchCommitOpType() byte {
 	return batchControlMask
 }
 
+func BatchAbortOpType() byte {
+	return batchControlMask | batchAbortMask
+}
+
 func IsBatchControlOpType(opType byte) bool {
 	return (opType & batchControlMask) != 0
 }
 
 func IsBatchBeginOpType(opType byte) bool {
 	return IsBatchControlOpType(opType) && (opType&batchBeginMask) != 0
+}
+
+func IsBatchAbortOpType(opType byte) bool {
+	return IsBatchControlOpType(opType) && (opType&batchAbortMask) != 0
+}
+
+func IsBatchCommitOpType(opType byte) bool {
+	return IsBatchControlOpType(opType) && !IsBatchBeginOpType(opType) && !IsBatchAbortOpType(opType)
 }
 
 type WALRecord struct {

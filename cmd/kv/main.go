@@ -45,6 +45,9 @@ Formats:
   GET(key)
   DELETE(key)
   DELETE_RANGE(startKey,endKey)
+  SNAPSHOT_CREATE()
+  SNAPSHOT_CREATE(name)
+  SNAPSHOT_GET(snapshotId,key)
   MERKLE_VALIDATE(sstable_name)
   EXIT
 `)
@@ -138,6 +141,42 @@ Formats:
 			}
 			fmt.Printf("MERKLE MISMATCH expectedRoot=%s actualRoot=%s expectedLeaves=%d actualLeaves=%d changedLeafIndices=%v\n",
 				res.ExpectedRootHex, res.ActualRootHex, res.ExpectedLeafCount, res.ActualLeafCount, res.ChangedLeafIndices)
+
+		case "SNAPSHOT_CREATE":
+			if len(args) > 1 {
+				fmt.Println("usage: SNAPSHOT_CREATE() or SNAPSHOT_CREATE(name)")
+				continue
+			}
+			var (
+				id  string
+				err error
+			)
+			if len(args) == 1 {
+				id, err = eng.SnapshotCreate(args[0])
+			} else {
+				id, err = eng.SnapshotCreate()
+			}
+			if err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println(id)
+
+		case "SNAPSHOT_GET":
+			if len(args) != 2 {
+				fmt.Println("usage: SNAPSHOT_GET(snapshotId,key)")
+				continue
+			}
+			val, found, err := eng.SnapshotGet(args[0], args[1])
+			if err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			if !found {
+				fmt.Println("(nil)")
+			} else {
+				fmt.Println(string(val))
+			}
 
 		case "PUT":
 			if err := runBinaryWriteCommand(args, "PUT", eng.Put); err != nil {

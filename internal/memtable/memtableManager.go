@@ -170,6 +170,34 @@ func (m *MemtableManager) ApplyBatchAtomically(records []model.Record) error {
 	return nil
 }
 
+func (m *MemtableManager) CanApplyBatchAtomically(records []model.Record) error {
+	if len(records) == 0 {
+		return nil
+	}
+	clone, err := m.deepClone()
+	if err != nil {
+		return err
+	}
+	for _, rec := range records {
+		var (
+			flushNeeded bool
+			opErr       error
+		)
+		if rec.Kind == model.RecordKindKV && rec.Tombstone {
+			flushNeeded, opErr = clone.Delete(rec)
+		} else {
+			flushNeeded, opErr = clone.Put(rec)
+		}
+		if opErr != nil {
+			return opErr
+		}
+		if flushNeeded {
+			return fmt.Errorf("batch exceeds memtable transactional capacity")
+		}
+	}
+	return nil
+}
+
 // Put/Delete vracaju flushNeeded=true kad je active postala puna i nema slobodnog slota (tj. popunili smo svih N).
 func (m *MemtableManager) Put(r model.Record) (bool, error) {
 	m.tables[m.active].Put(r)
