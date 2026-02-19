@@ -43,6 +43,7 @@ Formats:
   GET(key)
   DELETE(key)
   MERKLE_VALIDATE(sstable_name)
+  BACKUP
   EXIT
 `)
 
@@ -69,6 +70,12 @@ Formats:
 		case "EXIT", "QUIT":
 			return
 
+		case "BACKUP":
+			if err := eng.Backup(); err != nil {
+				fmt.Println("backup error:", err)
+			} else {
+				fmt.Println("backup completed")
+			}
 		case "GET":
 			if len(args) != 1 {
 				fmt.Println("usage: GET(key)")

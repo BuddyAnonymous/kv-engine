@@ -31,6 +31,9 @@ type Config struct {
 	HLLPrecision        uint8   `json:"hll_precision"`
 	HLLSeed             uint32  `json:"hll_seed"`
 
+	// Backup
+	BackupRoot string `json:"backup_root"`
+
 	// LSM Tree params
 	LSMMaxLevels              int    `json:"lsm_max_levels"`
 	LSMCompactionAlgorithm    string `json:"lsm_compaction_algorithm"`
@@ -63,6 +66,8 @@ func Default() Config {
 		CMSSeed:              0,
 		HLLPrecision:         14,
 		HLLSeed:              0,
+
+		BackupRoot:                "backups",
 
 		LSMMaxLevels:              4,
 		LSMCompactionAlgorithm:    "size_tiered",
@@ -162,6 +167,11 @@ func (c *Config) Normalize() {
 
 	if c.SegmentBlocks <= 0 {
 		c.SegmentBlocks = d.SegmentBlocks
+	}
+
+	// BackupRoot
+	if c.BackupRoot == "" {
+		c.BackupRoot = d.BackupRoot
 	}
 
 	// LSM params
