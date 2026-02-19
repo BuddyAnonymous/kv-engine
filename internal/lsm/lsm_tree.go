@@ -179,19 +179,19 @@ func (t *LSMTree) CollectKVPrefixRecords(prefix string) ([]model.Record, error) 
 // It also purges merge operands for deleted probabilistic instances and cleans up ProbMeta.
 func (t *LSMTree) maybeCompact() error {
 
-	// Determine which probabilistic instances have been deleted.
-	deleted, err := t.getDeletedInstances()
+	// Determine which probabilistic instances have been deleted and epoch boundaries.
+	deleted, epochBoundary, err := t.getDeletedAndEpochBoundaries()
 	if err != nil {
 		return fmt.Errorf("get deleted instances: %w", err)
 	}
 
 	switch t.cfg.Algorithm {
 	case "size_tiered":
-		err = t.sizeTieredCompaction(deleted)
+		err = t.sizeTieredCompaction(deleted, epochBoundary)
 	case "leveled":
-		err = t.leveledCompaction(deleted)
+		err = t.leveledCompaction(deleted, epochBoundary)
 	default:
-		err = t.sizeTieredCompaction(deleted)
+		err = t.sizeTieredCompaction(deleted, epochBoundary)
 	}
 	if err != nil {
 		return err
@@ -207,13 +207,16 @@ func (t *LSMTree) maybeCompact() error {
 	return nil
 }
 
-// getDeletedInstances reads ProbMeta and returns the set of (structure, key) pairs
-// whose latest action is "delete". Merge operands for these instances should be purged.
-func (t *LSMTree) getDeletedInstances() (map[instanceKey]bool, error) {
+// getDeletedAndEpochBoundaries reads ProbMeta and returns:
+//   - deleted: set of (structure, key) pairs whose latest action is "delete".
+//   - epochBoundary: for live instances (latest action is "create"), the Seq of that
+//     create record. Merge operands with Seq < epochBoundary belong to a previous
+//     create/delete cycle and should be purged.
+func (t *LSMTree) getDeletedAndEpochBoundaries() (map[instanceKey]bool, map[instanceKey]uint64, error) {
 
 	allMeta, err := t.sst.ReadAllProbMeta()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Find the latest action for each (structure, key).
@@ -226,18 +229,24 @@ func (t *LSMTree) getDeletedInstances() (map[instanceKey]bool, error) {
 	}
 
 	deleted := make(map[instanceKey]bool)
+	epochBoundary := make(map[instanceKey]uint64)
 	for ik, rec := range latest {
 		if rec.Action == model.ProbMetaActionDelete {
 			deleted[ik] = true
+		} else if rec.Action == model.ProbMetaActionCreate {
+			epochBoundary[ik] = rec.Seq
 		}
 	}
-	return deleted, nil
+	return deleted, epochBoundary, nil
 }
 
-// filterDeletedOperands removes merge operands that belong to deleted probabilistic instances.
-func filterDeletedOperands(records []model.Record, deleted map[instanceKey]bool) []model.Record {
+// filterStaleOperands removes merge operands that:
+//   - belong to deleted probabilistic instances, OR
+//   - have a Seq < the epoch boundary (latest create Seq) for their instance,
+//     meaning they belong to a previous create/delete cycle.
+func filterStaleOperands(records []model.Record, deleted map[instanceKey]bool, epochBoundary map[instanceKey]uint64) []model.Record {
 
-	if len(deleted) == 0 {
+	if len(deleted) == 0 && len(epochBoundary) == 0 {
 		return records
 	}
 	out := make([]model.Record, 0, len(records))
@@ -245,6 +254,10 @@ func filterDeletedOperands(records []model.Record, deleted map[instanceKey]bool)
 		if rec.Kind == model.RecordKindMergeOperand {
 			ik := instanceKey{rec.Structure, rec.Key}
 			if deleted[ik] {
+				continue
+			}
+			// Purge operands from a previous epoch (before latest create).
+			if createSeq, ok := epochBoundary[ik]; ok && rec.Seq < createSeq {
 				continue
 			}
 		}
@@ -389,6 +402,21 @@ func mergeAndDedupPurge(batches [][]model.Record) []model.Record {
 			continue
 		}
 		// Purge expired records.
+		if rec.ExpiresAt > 0 && rec.ExpiresAt <= now {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// filterExpiredRecords removes records whose TTL has expired.
+// Unlike mergeAndDedupPurge, this does NOT remove tombstones (they must propagate
+// to lower levels to mask older versions).
+func filterExpiredRecords(records []model.Record) []model.Record {
+	now := uint64(time.Now().Unix())
+	out := make([]model.Record, 0, len(records))
+	for _, rec := range records {
 		if rec.ExpiresAt > 0 && rec.ExpiresAt <= now {
 			continue
 		}

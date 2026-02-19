@@ -76,18 +76,22 @@ func (m *Manager) FlushToDir(dir string, records []model.Record) error {
 	}
 }
 
-// DeleteSSTable removes all files belonging to a single SSTable (data, index, summary, filter, merkle).
-func (m *Manager) DeleteSSTable(dataPath string) error {
-	exts := []string{".data", ".index", ".summary", ".filter", ".merkle"}
-	basePath := dataPath
+// DeleteSSTable removes all files belonging to a single SSTable identified by its base path.
+// Handles both multi-file (.data, .index, .summary, .filter, .merkle) and single-file (.sst) formats,
+// plus the TOC file.
+func (m *Manager) DeleteSSTable(basePath string) error {
+	// Try to strip known extensions if a full file path was passed instead of base path.
+	exts := []string{".data", ".index", ".summary", ".filter", ".merkle", ".sst", ".toc"}
 	for _, ext := range exts {
-		if len(dataPath) > len(ext) && dataPath[len(dataPath)-len(ext):] == ext {
-			basePath = dataPath[:len(dataPath)-len(ext)]
+		if len(basePath) > len(ext) && basePath[len(basePath)-len(ext):] == ext {
+			basePath = basePath[:len(basePath)-len(ext)]
 			break
 		}
 	}
 
-	for _, ext := range exts {
+	// Remove all possible SSTable component files.
+	allExts := []string{".data", ".index", ".summary", ".filter", ".merkle", ".sst", ".toc"}
+	for _, ext := range allExts {
 		p := basePath + ext
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("failed to remove %s: %w", p, err)
