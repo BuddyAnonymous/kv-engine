@@ -152,3 +152,21 @@ func (bm *BlockManager) AppendBlock(path string, data []byte, blockSize int) (ui
 
 	return blockNum, nil
 }
+
+// TruncateFile menja velicinu fajla na zadatu vrednost.
+func (bm *BlockManager) TruncateFile(path string, size int64) error {
+	if size < 0 {
+		return fmt.Errorf("invalid truncate size: %d", size)
+	}
+
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	if err := file.Truncate(size); err != nil {
+		return err
+	}
+	return file.Sync()
+}
