@@ -528,6 +528,70 @@ func maxSeq(a, b uint64) uint64 {
 	return b
 }
 
+// reloadRuntimeAfterRestore potpuno osvezava runtime state engine-a nakon restore-a sa diska.
+func (e *Engine) reloadRuntimeAfterRestore() error {
+	fact, err := memtable.FactoryFromConfig(e.cfg)
+	if err != nil {
+		return err
+	}
+	mem, err := memtable.NewMemtableManager(e.cfg.MemtableInstances, fact)
+	if err != nil {
+		return err
+	}
+
+	bm := block.NewBlockManager(e.cfg.BlockCacheSize)
+	sstBaseDir := filepath.Join(e.cfg.DataDir, "sstable")
+	sstMgr := sstable.New(filepath.Join(sstBaseDir, "level0"), e.cfg.MultiFileSSTable, bm, e.cfg.BlockSize, uint64(e.cfg.SummaryStride))
+	lsmCfg := lsm.LSMConfig{
+		MaxLevels:             e.cfg.LSMMaxLevels,
+		Algorithm:             e.cfg.LSMCompactionAlgorithm,
+		SizeTieredMinSSTables: e.cfg.LSMSizeTieredMinSSTables,
+		LeveledL0Threshold:    e.cfg.LSMLeveledL0Threshold,
+		LeveledBaseSizeMB:     e.cfg.LSMLeveledBaseSizeMB,
+		LeveledMultiplier:     e.cfg.LSMLeveledMultiplier,
+	}
+	lsmTree, err := lsm.NewLSMTree(lsmCfg, sstMgr, sstBaseDir)
+	if err != nil {
+		return fmt.Errorf("failed to create lsm tree: %w", err)
+	}
+	backupMgr, err := backup.NewBackupManager(bm, e.cfg.BlockSize)
+	if err != nil {
+		return fmt.Errorf("failed to create backup manager: %w", err)
+	}
+
+	// Rekreiramo sve runtime komponente koje drze state u memoriji.
+	e.seq = 0
+	e.bm = bm
+	e.cache = cache.New(e.cfg.CacheSize)
+	e.cacheEpoch = 1
+	e.mem = mem
+	e.sst = sstMgr
+	e.lsm = lsmTree
+	e.backupMgr = backupMgr
+	e.iterators = make(map[uint64]*scanIterator)
+	e.nextIteratorID = 0
+	e.wal = nil
+
+	walManager, walErr, lastSeq := wal.NewWALManager(filepath.Join(e.cfg.DataDir, "wal"), e.cfg.SegmentBlocks, e.cfg.BlockSize, bm, e)
+	if walErr != nil {
+		return walErr
+	}
+	e.wal = walManager
+	if lastSeq > e.seq {
+		e.seq = lastSeq
+	}
+
+	maxProbMetaSeq, err := e.sst.MaxProbMetaSeq()
+	if err != nil {
+		return err
+	}
+	if maxProbMetaSeq > e.seq {
+		e.seq = maxProbMetaSeq
+	}
+
+	return nil
+}
+
 func structureName(s model.StructureType) string {
 	switch s {
 	case model.StructureTypeBloomFilter:
@@ -671,8 +735,11 @@ func (e *Engine) Backup() error {
 				fmt.Println("greska pri restore-u:", err)
 				continue
 			}
+			if err := e.reloadRuntimeAfterRestore(); err != nil {
+				fmt.Println("restore uradjen, ali osvezavanje engine stanja nije uspelo:", err)
+				continue
+			}
 			fmt.Println("Restore zavrsen uspesno.")
-			// Obrisati cache i memtable, i replay-ovati WAL da se podaci ucitaju u memtable nakon restore-a
 
 		case "4":
 			list, err := e.backupMgr.ListBackups(e.cfg.BackupRoot)
