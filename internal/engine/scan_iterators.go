@@ -14,6 +14,7 @@ type scanIterator struct {
 }
 
 func (e *Engine) PrefixScan(prefix string, pageNumber, pageSize int) ([]model.KVPair, error) {
+
 	if pageNumber < 1 {
 		return nil, fmt.Errorf("pageNumber must be >= 1")
 	}
@@ -21,9 +22,7 @@ func (e *Engine) PrefixScan(prefix string, pageNumber, pageSize int) ([]model.KV
 		return nil, fmt.Errorf("pageSize must be >= 1")
 	}
 
-	all, err := e.collectVisibleSortedPairs(func(key string) bool {
-		return len(prefix) == 0 || (len(key) >= len(prefix) && key[:len(prefix)] == prefix)
-	})
+	all, err := e.collectVisibleSortedPairsByPrefix(prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -31,6 +30,7 @@ func (e *Engine) PrefixScan(prefix string, pageNumber, pageSize int) ([]model.KV
 }
 
 func (e *Engine) RangeScan(minKey, maxKey string, pageNumber, pageSize int) ([]model.KVPair, error) {
+
 	if pageNumber < 1 {
 		return nil, fmt.Errorf("pageNumber must be >= 1")
 	}
@@ -41,9 +41,7 @@ func (e *Engine) RangeScan(minKey, maxKey string, pageNumber, pageSize int) ([]m
 		return nil, fmt.Errorf("invalid range: minKey > maxKey")
 	}
 
-	all, err := e.collectVisibleSortedPairs(func(key string) bool {
-		return key >= minKey && key <= maxKey
-	})
+	all, err := e.collectVisibleSortedPairsByRange(minKey, maxKey)
 	if err != nil {
 		return nil, err
 	}
@@ -51,9 +49,8 @@ func (e *Engine) RangeScan(minKey, maxKey string, pageNumber, pageSize int) ([]m
 }
 
 func (e *Engine) PrefixIterate(prefix string) (uint64, error) {
-	all, err := e.collectVisibleSortedPairs(func(key string) bool {
-		return len(prefix) == 0 || (len(key) >= len(prefix) && key[:len(prefix)] == prefix)
-	})
+
+	all, err := e.collectVisibleSortedPairsByPrefix(prefix)
 	if err != nil {
 		return 0, err
 	}
@@ -61,12 +58,11 @@ func (e *Engine) PrefixIterate(prefix string) (uint64, error) {
 }
 
 func (e *Engine) RangeIterate(minKey, maxKey string) (uint64, error) {
+
 	if minKey > maxKey {
 		return 0, fmt.Errorf("invalid range: minKey > maxKey")
 	}
-	all, err := e.collectVisibleSortedPairs(func(key string) bool {
-		return key >= minKey && key <= maxKey
-	})
+	all, err := e.collectVisibleSortedPairsByRange(minKey, maxKey)
 	if err != nil {
 		return 0, err
 	}
@@ -74,6 +70,7 @@ func (e *Engine) RangeIterate(minKey, maxKey string) (uint64, error) {
 }
 
 func (e *Engine) IteratorNext(id uint64) (model.KVPair, bool, error) {
+
 	it, ok := e.iterators[id]
 	if !ok {
 		return model.KVPair{}, false, fmt.Errorf("iterator not found")
@@ -87,6 +84,7 @@ func (e *Engine) IteratorNext(id uint64) (model.KVPair, bool, error) {
 }
 
 func (e *Engine) IteratorStop(id uint64) error {
+
 	if _, ok := e.iterators[id]; !ok {
 		return fmt.Errorf("iterator not found")
 	}
@@ -95,18 +93,51 @@ func (e *Engine) IteratorStop(id uint64) error {
 }
 
 func (e *Engine) newIterator(results []model.KVPair) uint64 {
+
 	e.nextIteratorID++
 	id := e.nextIteratorID
 	e.iterators[id] = &scanIterator{results: clonePairs(results)}
 	return id
 }
 
-func (e *Engine) collectVisibleSortedPairs(filter func(string) bool) ([]model.KVPair, error) {
-	memRecs := e.mem.SnapshotSorted()
-	sstRecs, err := e.lsm.CollectAllRecords()
+func (e *Engine) collectVisibleSortedPairsByPrefix(prefix string) ([]model.KVPair, error) {
+
+	memFilter := func(key string) bool {
+
+		return len(prefix) == 0 || (len(key) >= len(prefix) && key[:len(prefix)] == prefix)
+	}
+
+	var (
+		sstRecs []model.Record
+		err     error
+	)
+	if prefix == "" {
+		sstRecs, err = e.lsm.CollectAllRecords()
+	} else {
+		sstRecs, err = e.lsm.CollectKVPrefixRecords(prefix)
+	}
 	if err != nil {
 		return nil, err
 	}
+	return e.collectVisibleSortedPairsFromSources(memFilter, sstRecs), nil
+}
+
+func (e *Engine) collectVisibleSortedPairsByRange(minKey, maxKey string) ([]model.KVPair, error) {
+
+	memFilter := func(key string) bool {
+
+		return key >= minKey && key <= maxKey
+	}
+	sstRecs, err := e.lsm.CollectKVRangeRecords(minKey, maxKey)
+	if err != nil {
+		return nil, err
+	}
+	return e.collectVisibleSortedPairsFromSources(memFilter, sstRecs), nil
+}
+
+func (e *Engine) collectVisibleSortedPairsFromSources(memFilter func(string) bool, sstRecs []model.Record) []model.KVPair {
+
+	memRecs := e.mem.SnapshotSorted()
 
 	all := make([]model.Record, 0, len(memRecs)+len(sstRecs))
 	all = append(all, memRecs...)
@@ -120,7 +151,7 @@ func (e *Engine) collectVisibleSortedPairs(filter func(string) bool) ([]model.KV
 		if isInternalSystemKey(rec.Key) {
 			continue
 		}
-		if filter != nil && !filter(rec.Key) {
+		if memFilter != nil && !memFilter(rec.Key) {
 			continue
 		}
 		old, ok := latestByKey[rec.Key]
@@ -150,10 +181,11 @@ func (e *Engine) collectVisibleSortedPairs(filter func(string) bool) ([]model.KV
 			Value: clonePairValue(rec.Value),
 		})
 	}
-	return out, nil
+	return out
 }
 
 func paginatePairs(in []model.KVPair, pageNumber, pageSize int) []model.KVPair {
+
 	start := (pageNumber - 1) * pageSize
 	if start >= len(in) {
 		return []model.KVPair{}
@@ -167,6 +199,7 @@ func paginatePairs(in []model.KVPair, pageNumber, pageSize int) []model.KVPair {
 }
 
 func clonePairs(in []model.KVPair) []model.KVPair {
+
 	out := make([]model.KVPair, len(in))
 	for i := range in {
 		out[i] = clonePair(in[i])
@@ -175,6 +208,7 @@ func clonePairs(in []model.KVPair) []model.KVPair {
 }
 
 func clonePair(in model.KVPair) model.KVPair {
+
 	return model.KVPair{
 		Key:   in.Key,
 		Value: clonePairValue(in.Value),
@@ -182,6 +216,7 @@ func clonePair(in model.KVPair) model.KVPair {
 }
 
 func clonePairValue(in []byte) []byte {
+
 	if in == nil {
 		return nil
 	}

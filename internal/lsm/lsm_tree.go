@@ -28,6 +28,7 @@ type LSMTree struct {
 
 // NewLSMTree creates a new LSM tree. It ensures all level directories exist.
 func NewLSMTree(cfg LSMConfig, sst *sstable.Manager, baseDir string) (*LSMTree, error) {
+
 	t := &LSMTree{
 		cfg:     cfg,
 		sst:     sst,
@@ -47,11 +48,13 @@ func NewLSMTree(cfg LSMConfig, sst *sstable.Manager, baseDir string) (*LSMTree, 
 
 // levelDir returns the directory path for a given level.
 func (t *LSMTree) levelDir(level int) string {
+
 	return filepath.Join(t.baseDir, fmt.Sprintf("level%d", level))
 }
 
 // Flush writes sorted records to L0 and then triggers compaction if needed.
 func (t *LSMTree) Flush(records []model.Record) error {
+
 	l0Dir := t.levelDir(0)
 	if err := t.sst.FlushToDir(l0Dir, records); err != nil {
 		return err
@@ -61,6 +64,7 @@ func (t *LSMTree) Flush(records []model.Record) error {
 
 // Get searches for a key through all levels (L0..Ln), newest first at each level.
 func (t *LSMTree) Get(key string) ([]byte, bool, error) {
+
 	rec, found, err := t.GetRecord(key)
 	if err != nil {
 		return nil, false, err
@@ -75,6 +79,7 @@ func (t *LSMTree) Get(key string) ([]byte, bool, error) {
 // newest first at each level.
 // A tombstone/expired KV on a higher level hides all older levels.
 func (t *LSMTree) GetRecord(key string) (model.Record, bool, error) {
+
 	now := uint64(time.Now().Unix())
 	for lvl := 0; lvl < t.cfg.MaxLevels; lvl++ {
 		dir := t.levelDir(lvl)
@@ -94,6 +99,7 @@ func (t *LSMTree) GetRecord(key string) (model.Record, bool, error) {
 
 // GetMergeOperands collects merge operands from all levels.
 func (t *LSMTree) GetMergeOperands(structure model.StructureType, key string) ([]model.Record, error) {
+
 	var allOps []model.Record
 	for lvl := 0; lvl < t.cfg.MaxLevels; lvl++ {
 		dir := t.levelDir(lvl)
@@ -105,6 +111,7 @@ func (t *LSMTree) GetMergeOperands(structure model.StructureType, key string) ([
 	}
 
 	sort.SliceStable(allOps, func(i, j int) bool {
+
 		if allOps[i].Seq != allOps[j].Seq {
 			return allOps[i].Seq < allOps[j].Seq
 		}
@@ -119,6 +126,7 @@ func (t *LSMTree) GetMergeOperands(structure model.StructureType, key string) ([
 
 // CollectAllRecords reads all records from every level and returns them in one slice.
 func (t *LSMTree) CollectAllRecords() ([]model.Record, error) {
+
 	out := make([]model.Record, 0)
 	for lvl := 0; lvl < t.cfg.MaxLevels; lvl++ {
 		dir := t.levelDir(lvl)
@@ -137,9 +145,40 @@ func (t *LSMTree) CollectAllRecords() ([]model.Record, error) {
 	return out, nil
 }
 
+// CollectKVRangeRecords collects KV records from all levels in [minKey, maxKey].
+func (t *LSMTree) CollectKVRangeRecords(minKey, maxKey string) ([]model.Record, error) {
+
+	out := make([]model.Record, 0)
+	for lvl := 0; lvl < t.cfg.MaxLevels; lvl++ {
+		dir := t.levelDir(lvl)
+		recs, err := t.sst.CollectKVRangeFromDir(dir, minKey, maxKey, false)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, recs...)
+	}
+	return out, nil
+}
+
+// CollectKVPrefixRecords collects KV records from all levels for keys with the prefix.
+func (t *LSMTree) CollectKVPrefixRecords(prefix string) ([]model.Record, error) {
+
+	out := make([]model.Record, 0)
+	for lvl := 0; lvl < t.cfg.MaxLevels; lvl++ {
+		dir := t.levelDir(lvl)
+		recs, err := t.sst.CollectKVPrefixFromDir(dir, prefix)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, recs...)
+	}
+	return out, nil
+}
+
 // maybeCompact checks all levels and triggers compaction when thresholds are exceeded.
 // It also purges merge operands for deleted probabilistic instances and cleans up ProbMeta.
 func (t *LSMTree) maybeCompact() error {
+
 	// Determine which probabilistic instances have been deleted.
 	deleted, err := t.getDeletedInstances()
 	if err != nil {
@@ -171,6 +210,7 @@ func (t *LSMTree) maybeCompact() error {
 // getDeletedInstances reads ProbMeta and returns the set of (structure, key) pairs
 // whose latest action is "delete". Merge operands for these instances should be purged.
 func (t *LSMTree) getDeletedInstances() (map[instanceKey]bool, error) {
+
 	allMeta, err := t.sst.ReadAllProbMeta()
 	if err != nil {
 		return nil, err
@@ -196,6 +236,7 @@ func (t *LSMTree) getDeletedInstances() (map[instanceKey]bool, error) {
 
 // filterDeletedOperands removes merge operands that belong to deleted probabilistic instances.
 func filterDeletedOperands(records []model.Record, deleted map[instanceKey]bool) []model.Record {
+
 	if len(deleted) == 0 {
 		return records
 	}
@@ -217,6 +258,7 @@ func filterDeletedOperands(records []model.Record, deleted map[instanceKey]bool)
 // is still alive). Deleted instances have their entries removed ONLY if no merge
 // operands for that instance remain in any SSTable across all levels.
 func (t *LSMTree) cleanupProbMeta() error {
+
 	allMeta, err := t.sst.ReadAllProbMeta()
 	if err != nil {
 		return err
@@ -276,7 +318,9 @@ func (t *LSMTree) cleanupProbMeta() error {
 // Records are assumed sorted by key within each slice. When multiple records share a key,
 // the one with the highest Seq wins.
 func mergeAndDedup(batches [][]model.Record) []model.Record {
+
 	// Flatten all
+
 	var all []model.Record
 	for _, b := range batches {
 		all = append(all, b...)
@@ -284,6 +328,7 @@ func mergeAndDedup(batches [][]model.Record) []model.Record {
 
 	// Sort by key, then by Seq descending
 	sort.SliceStable(all, func(i, j int) bool {
+
 		if all[i].Key != all[j].Key {
 			return all[i].Key < all[j].Key
 		}
@@ -311,6 +356,7 @@ func mergeAndDedup(batches [][]model.Record) []model.Record {
 
 	// Re-sort output by key for flush
 	sort.SliceStable(out, func(i, j int) bool {
+
 		if out[i].Key != out[j].Key {
 			return out[i].Key < out[j].Key
 		}
@@ -332,6 +378,7 @@ func mergeAndDedup(batches [][]model.Record) []model.Record {
 // mergeAndDedupPurge is like mergeAndDedup but also removes tombstones and expired records.
 // This is safe to use only on the last level where no older versions can exist below.
 func mergeAndDedupPurge(batches [][]model.Record) []model.Record {
+
 	merged := mergeAndDedup(batches)
 
 	now := uint64(time.Now().Unix())

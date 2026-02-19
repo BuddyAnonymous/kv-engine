@@ -38,6 +38,7 @@ type fileHeader struct {
 }
 
 func (m *Manager) Get(key string) ([]byte, bool, error) {
+
 	tables, err := m.listAllTableRefsNewestFirst()
 	if err != nil {
 		return nil, false, err
@@ -102,6 +103,7 @@ func (m *Manager) Get(key string) ([]byte, bool, error) {
 }
 
 func (m *Manager) GetMergeOperands(structure model.StructureType, key string) ([]model.Record, error) {
+
 	if structure == model.StructureTypeNone {
 		return nil, fmt.Errorf("invalid merge structure type")
 	}
@@ -126,6 +128,7 @@ func (m *Manager) GetMergeOperands(structure model.StructureType, key string) ([
 				return nil, err
 			}
 			err = m.scanSingleDataSection(singlePath, blockSize, footer, func(rec model.Record) (bool, error) {
+
 				if rec.Key < key {
 					return false, nil
 				}
@@ -179,6 +182,7 @@ func (m *Manager) GetMergeOperands(structure model.StructureType, key string) ([
 	}
 
 	sort.SliceStable(ops, func(i, j int) bool {
+
 		if ops[i].Seq != ops[j].Seq {
 			return ops[i].Seq < ops[j].Seq
 		}
@@ -192,6 +196,7 @@ func (m *Manager) GetMergeOperands(structure model.StructureType, key string) ([
 }
 
 func (m *Manager) getLatestKVFromDataFile(dataPath, key string) (model.Record, bool, error) {
+
 	blockSize, startDataBlock, endDataBlock, ok, err := m.locateDataRangeForAllKeyRecords(dataPath, key)
 	if err != nil {
 		return model.Record{}, false, err
@@ -203,6 +208,7 @@ func (m *Manager) getLatestKVFromDataFile(dataPath, key string) (model.Record, b
 }
 
 func (m *Manager) getKeyRecordsFromDataFile(dataPath, key string) ([]model.Record, bool, error) {
+
 	blockSize, startDataBlock, endDataBlock, ok, err := m.locateDataRangeForAllKeyRecords(dataPath, key)
 	if err != nil {
 		return nil, false, err
@@ -214,6 +220,7 @@ func (m *Manager) getKeyRecordsFromDataFile(dataPath, key string) ([]model.Recor
 }
 
 func (m *Manager) locateDataRangeForAllKeyRecords(dataPath, key string) (blockSize int, startDataBlock, endDataBlock uint64, ok bool, err error) {
+
 	basePath := strings.TrimSuffix(dataPath, ".data")
 	indexPath := basePath + ".index"
 	summaryPath := basePath + ".summary"
@@ -304,6 +311,7 @@ func (m *Manager) locateDataRangeForAllKeyRecords(dataPath, key string) (blockSi
 }
 
 func (m *Manager) searchDataRangeForKey(dataPath string, blockSize int, key string, startBlock, endBlock uint64) ([]model.Record, bool, error) {
+
 	prevKey := ""
 	var pending []byte
 	out := make([]model.Record, 0, 1)
@@ -407,6 +415,7 @@ func (m *Manager) searchDataRangeForKey(dataPath string, blockSize int, key stri
 }
 
 func (m *Manager) searchDataRangeForLatestKV(dataPath string, blockSize int, key string, startBlock, endBlock uint64) (model.Record, bool, error) {
+
 	prevKey := ""
 	var pending []byte
 	var (
@@ -517,6 +526,7 @@ func (m *Manager) searchDataRangeForLatestKV(dataPath string, blockSize int, key
 }
 
 func decodeDataRecord(buf []byte, prevKey string) (model.Record, int, error) {
+
 	off := 0
 	if len(buf) == 0 {
 		return model.Record{}, 0, fmt.Errorf("empty data record buffer")
@@ -597,6 +607,7 @@ func decodeDataRecord(buf []byte, prevKey string) (model.Record, int, error) {
 }
 
 func (m *Manager) readSummaryMeta(path string, blockSize int, key string) (summaryMeta, error) {
+
 	blockCount, err := m.countBlocks(path, blockSize)
 	if err != nil {
 		return summaryMeta{}, err
@@ -681,6 +692,7 @@ func (m *Manager) readSummaryMeta(path string, blockSize int, key string) (summa
 }
 
 func decodeSummaryEntries(payload []byte, start int, targetKey string) ([]summaryEntry, error) {
+
 	off := start
 	prevKey := ""
 	out := make([]summaryEntry, 0)
@@ -723,6 +735,7 @@ func decodeSummaryEntries(payload []byte, start int, targetKey string) ([]summar
 }
 
 func (m *Manager) readIndexEntriesFromBlock(path string, blockSize int, startBlock uint64, targetKey string) ([]indexEntry, error) {
+
 	blockCount, err := m.countBlocks(path, blockSize)
 	if err != nil {
 		return nil, err
@@ -794,6 +807,7 @@ func (m *Manager) readIndexEntriesFromBlock(path string, blockSize int, startBlo
 }
 
 func (m *Manager) readPayloadBlock(path string, blockSize int, blockNo uint64) ([]byte, error) {
+
 	blockData, err := m.bm.ReadBlock(path, blockNo, blockSize)
 	if err != nil {
 		return nil, err
@@ -817,6 +831,7 @@ func (m *Manager) readPayloadBlock(path string, blockSize int, blockNo uint64) (
 }
 
 func (m *Manager) countBlocks(path string, blockSize int) (uint64, error) {
+
 	if blockSize <= 0 {
 		return 0, fmt.Errorf("invalid block size %d for %s", blockSize, path)
 	}
@@ -835,7 +850,9 @@ func (m *Manager) countBlocks(path string, blockSize int) (uint64, error) {
 }
 
 func (m *Manager) readFileHeader(path string) (fileHeader, error) {
+
 	// Layout: [payloadLen(4B)] [magic(4B)|blockSize(u16)|flags(u16)] ...
+
 	raw, err := m.bm.ReadAt(path, int64(payloadLenBytes), 8)
 	if err != nil {
 		return fileHeader{}, err
@@ -858,6 +875,7 @@ func (m *Manager) readFileHeader(path string) (fileHeader, error) {
 }
 
 func readUvarintAt(b []byte, off *int) (uint64, error) {
+
 	if *off >= len(b) {
 		return 0, fmt.Errorf("uvarint offset out of range")
 	}
@@ -870,6 +888,7 @@ func readUvarintAt(b []byte, off *int) (uint64, error) {
 }
 
 func checkedChunkLen(n uint64, available int, what string) (int, error) {
+
 	if available < 0 {
 		return 0, fmt.Errorf("%s out of bounds", what)
 	}
@@ -880,6 +899,7 @@ func checkedChunkLen(n uint64, available int, what string) (int, error) {
 }
 
 func isExpired(rec model.Record, now uint64) bool {
+
 	return rec.ExpiresAt > 0 && rec.ExpiresAt <= now
 }
 
@@ -887,6 +907,7 @@ func isExpired(rec model.Record, now uint64) bool {
 
 // ListDataFilesInDir returns .data file paths sorted newest-first from the given directory.
 func (m *Manager) ListDataFilesInDir(dir string) ([]string, error) {
+
 	pattern := filepath.Join(dir, "sst_*.data")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
@@ -917,6 +938,7 @@ func (m *Manager) ListDataFilesInDir(dir string) ([]string, error) {
 	}
 
 	sort.Slice(files, func(i, j int) bool {
+
 		if files[i].ts != files[j].ts {
 			return files[i].ts > files[j].ts
 		}
@@ -934,6 +956,7 @@ func (m *Manager) ListDataFilesInDir(dir string) ([]string, error) {
 // across all SSTables in the given directory (newest first).
 // It returns the newest KV record even when it is tombstoned/expired.
 func (m *Manager) GetLatestKVRecordFromDir(dir string, key string) (model.Record, bool, error) {
+
 	dataFiles, err := m.ListDataFilesInDir(dir)
 	if err != nil {
 		return model.Record{}, false, err
@@ -966,6 +989,7 @@ func (m *Manager) GetLatestKVRecordFromDir(dir string, key string) (model.Record
 
 // GetRecordFromDir searches for a key across all SSTables in the given directory (newest first).
 func (m *Manager) GetRecordFromDir(dir string, key string) ([]byte, bool, error) {
+
 	rec, found, err := m.GetLatestKVRecordFromDir(dir, key)
 	if err != nil {
 		return nil, false, err
@@ -982,6 +1006,7 @@ func (m *Manager) GetRecordFromDir(dir string, key string) ([]byte, bool, error)
 
 // GetMergeOperandsFromDir collects merge operands from all SSTables in the given directory.
 func (m *Manager) GetMergeOperandsFromDir(dir string, structure model.StructureType, key string) ([]model.Record, error) {
+
 	dataFiles, err := m.ListDataFilesInDir(dir)
 	if err != nil {
 		return nil, err
@@ -1033,6 +1058,7 @@ func (m *Manager) GetMergeOperandsFromDir(dir string, structure model.StructureT
 // ReadAllRecordsFromFile reads all records from a .data file in sorted order.
 // This is used during compaction to merge SSTable contents.
 func (m *Manager) ReadAllRecordsFromFile(dataPath string) ([]model.Record, error) {
+
 	dataHdr, err := m.readFileHeader(dataPath)
 	if err != nil {
 		return nil, err
@@ -1132,6 +1158,7 @@ func (m *Manager) ReadAllRecordsFromFile(dataPath string) ([]model.Record, error
 // GetDirTotalSize returns the total size (in bytes) of all .data files in a directory.
 // Uses os.Stat which is metadata-only (no I/O through BlockManager needed for file size).
 func (m *Manager) GetDirTotalSize(dir string) (int64, error) {
+
 	pattern := filepath.Join(dir, "sst_*.data")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
@@ -1150,4 +1177,350 @@ func (m *Manager) GetDirTotalSize(dir string) (int64, error) {
 		total += info.Size()
 	}
 	return total, nil
+}
+
+// CollectKVRangeFromDir collects KV records in key range from all SSTables in dir.
+// endKey is optional; if endKey == "" range is unbounded on the right side.
+// When endExclusive is true, range is [startKey, endKey); otherwise [startKey, endKey].
+func (m *Manager) CollectKVRangeFromDir(dir, startKey, endKey string, endExclusive bool) ([]model.Record, error) {
+
+	dataFiles, err := m.ListDataFilesInDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	if len(dataFiles) == 0 {
+		return nil, nil
+	}
+
+	out := make([]model.Record, 0)
+	for _, dataPath := range dataFiles {
+		blockSize, startDataBlock, endDataBlock, ok, err := m.locateDataRangeForScan(dataPath, startKey, endKey, endExclusive)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		recs, err := m.scanDataRangeForKV(dataPath, blockSize, startDataBlock, endDataBlock, startKey, endKey, endExclusive, "")
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, recs...)
+	}
+	return out, nil
+}
+
+// CollectKVPrefixFromDir collects KV records whose key starts with prefix from all SSTables in dir.
+func (m *Manager) CollectKVPrefixFromDir(dir, prefix string) ([]model.Record, error) {
+
+	upper, hasUpper := prefixUpperBound(prefix)
+
+	dataFiles, err := m.ListDataFilesInDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	if len(dataFiles) == 0 {
+		return nil, nil
+	}
+
+	out := make([]model.Record, 0)
+	for _, dataPath := range dataFiles {
+		endKey := ""
+		if hasUpper {
+			endKey = upper
+		}
+
+		blockSize, startDataBlock, endDataBlock, ok, err := m.locateDataRangeForScan(dataPath, prefix, endKey, true)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+
+		recs, err := m.scanDataRangeForKV(dataPath, blockSize, startDataBlock, endDataBlock, prefix, endKey, true, prefix)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, recs...)
+	}
+	return out, nil
+}
+
+func (m *Manager) locateDataRangeForScan(dataPath, startKey, endKey string, endExclusive bool) (blockSize int, startDataBlock, endDataBlock uint64, ok bool, err error) {
+
+	basePath := strings.TrimSuffix(dataPath, ".data")
+	indexPath := basePath + ".index"
+	summaryPath := basePath + ".summary"
+
+	dataHdr, err := m.readFileHeader(dataPath)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	if dataHdr.magic != m.dataMagic {
+		return 0, 0, 0, false, fmt.Errorf("invalid data magic in %s", dataPath)
+	}
+
+	indexHdr, err := m.readFileHeader(indexPath)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	if indexHdr.magic != m.indexMagic {
+		return 0, 0, 0, false, fmt.Errorf("invalid index magic in %s", indexPath)
+	}
+
+	summaryHdr, err := m.readFileHeader(summaryPath)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	if summaryHdr.magic != m.summMagic {
+		return 0, 0, 0, false, fmt.Errorf("invalid summary magic in %s", summaryPath)
+	}
+
+	summ, err := m.readSummaryMeta(summaryPath, summaryHdr.blockSize, startKey)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+
+	if !rangeOverlapsTable(startKey, endKey, endExclusive, summ.minKey, summ.maxKey) {
+		return 0, 0, 0, false, nil
+	}
+
+	startIndexBlock := uint64(0)
+	if startKey != "" {
+		for _, se := range summ.entries {
+			if se.key < startKey {
+				startIndexBlock = se.indexBlockNo
+				continue
+			}
+			break
+		}
+	}
+
+	if startKey == "" {
+		startDataBlock = 0
+	} else {
+		indexEntries, err := m.readIndexEntriesFromBlock(indexPath, indexHdr.blockSize, startIndexBlock, startKey)
+		if err != nil {
+			return 0, 0, 0, false, err
+		}
+		var (
+			hasPrev   bool
+			predBlock uint64
+		)
+		for _, ie := range indexEntries {
+			if ie.key < startKey {
+				hasPrev = true
+				predBlock = ie.dataBlockNo
+				continue
+			}
+			break
+		}
+		if hasPrev {
+			startDataBlock = predBlock
+		} else {
+			startDataBlock = 0
+		}
+	}
+
+	endDataBlock, err = m.countBlocks(dataPath, dataHdr.blockSize)
+	if err != nil {
+		return 0, 0, 0, false, err
+	}
+	if startDataBlock >= endDataBlock {
+		return 0, 0, 0, false, nil
+	}
+
+	return dataHdr.blockSize, startDataBlock, endDataBlock, true, nil
+}
+
+func (m *Manager) scanDataRangeForKV(dataPath string, blockSize int, startBlock, endBlock uint64, startKey, endKey string, endExclusive bool, prefix string) ([]model.Record, error) {
+
+	prevKey := ""
+	var pending []byte
+	out := make([]model.Record, 0)
+	reachedPrefixWindow := prefix == ""
+
+	for blockNo := startBlock; blockNo < endBlock; blockNo++ {
+		payload, err := m.readPayloadBlock(dataPath, blockSize, blockNo)
+		if err != nil {
+			return nil, err
+		}
+
+		off := 0
+		if blockNo == 0 {
+			if len(payload) < 8 {
+				return nil, fmt.Errorf("data header too short in %s", dataPath)
+			}
+			if string(payload[:4]) != string(m.dataMagic[:]) {
+				return nil, fmt.Errorf("invalid data magic in %s", dataPath)
+			}
+			off = 8
+		}
+
+		for off < len(payload) {
+			flags := payload[off]
+			fragType := flags & fragTypeMask
+
+			if len(pending) == 0 {
+				switch fragType {
+				case 0b00:
+					rec, consumed, err := decodeDataRecord(payload[off:], prevKey)
+					if err != nil {
+						return nil, err
+					}
+					off += consumed
+					prevKey = rec.Key
+
+					if startKey != "" && rec.Key < startKey {
+						continue
+					}
+
+					if endKey != "" {
+						if endExclusive {
+							if rec.Key >= endKey {
+								return out, nil
+							}
+						} else {
+							if rec.Key > endKey {
+								return out, nil
+							}
+						}
+					}
+
+					if prefix != "" {
+						if rec.Key < prefix {
+							continue
+						}
+						if strings.HasPrefix(rec.Key, prefix) {
+							reachedPrefixWindow = true
+						} else if reachedPrefixWindow {
+							return out, nil
+						} else {
+							continue
+						}
+					}
+
+					if rec.Kind != model.RecordKindKV {
+						continue
+					}
+					out = append(out, rec)
+
+				case 0b10:
+					pending = append(pending, payload[off:]...)
+					off = len(payload)
+
+				case 0b01, 0b11:
+					return nil, fmt.Errorf("unexpected continuation fragment in %s block %d", dataPath, blockNo)
+
+				default:
+					return nil, fmt.Errorf("unknown fragment flag %d in %s block %d", fragType, dataPath, blockNo)
+				}
+				continue
+			}
+
+			if fragType != 0b01 && fragType != 0b11 {
+				return nil, fmt.Errorf("expected continuation fragment in %s block %d", dataPath, blockNo)
+			}
+
+			off++
+			chunkLen, err := readUvarintAt(payload, &off)
+			if err != nil {
+				return nil, err
+			}
+			chunkLenI, err := checkedChunkLen(chunkLen, len(payload)-off, "fragment chunk")
+			if err != nil {
+				return nil, fmt.Errorf("fragment chunk out of bounds in %s block %d", dataPath, blockNo)
+			}
+			pending = append(pending, payload[off:off+chunkLenI]...)
+			off += chunkLenI
+
+			if fragType == 0b01 {
+				rec, consumed, err := decodeDataRecord(pending, prevKey)
+				if err != nil {
+					return nil, err
+				}
+				if consumed != len(pending) {
+					return nil, fmt.Errorf("fragment assembly has extra bytes in %s block %d", dataPath, blockNo)
+				}
+				pending = pending[:0]
+				prevKey = rec.Key
+
+				if startKey != "" && rec.Key < startKey {
+					continue
+				}
+
+				if endKey != "" {
+					if endExclusive {
+						if rec.Key >= endKey {
+							return out, nil
+						}
+					} else {
+						if rec.Key > endKey {
+							return out, nil
+						}
+					}
+				}
+
+				if prefix != "" {
+					if rec.Key < prefix {
+						continue
+					}
+					if strings.HasPrefix(rec.Key, prefix) {
+						reachedPrefixWindow = true
+					} else if reachedPrefixWindow {
+						return out, nil
+					} else {
+						continue
+					}
+				}
+
+				if rec.Kind != model.RecordKindKV {
+					continue
+				}
+				out = append(out, rec)
+			}
+		}
+	}
+
+	if len(pending) != 0 {
+		return nil, fmt.Errorf("unterminated fragmented record in %s", dataPath)
+	}
+	return out, nil
+}
+
+func rangeOverlapsTable(startKey, endKey string, endExclusive bool, tableMin, tableMax string) bool {
+
+	if tableMax != "" && startKey != "" && startKey > tableMax {
+		return false
+	}
+	if endKey != "" && tableMin != "" {
+		if endExclusive {
+			if endKey <= tableMin {
+				return false
+			}
+		} else {
+			if endKey < tableMin {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func prefixUpperBound(prefix string) (string, bool) {
+
+	if prefix == "" {
+		return "", false
+	}
+	b := []byte(prefix)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] != 0xFF {
+			out := make([]byte, i+1)
+			copy(out, b[:i+1])
+			out[i]++
+			return string(out), true
+		}
+	}
+	return "", false
 }

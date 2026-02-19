@@ -5,6 +5,7 @@ import (
 	"errors"
 	"hash/fnv"
 	"kv-engine/internal/model"
+
 	"math"
 	"math/bits"
 	"time"
@@ -30,6 +31,7 @@ type HLL struct {
 
 // Konstruktor
 func NewHLL(p uint8) (*HLL, error) {
+
 	if p < HLL_MIN_PRECISION || p > HLL_MAX_PRECISION {
 		return nil, ErrInvalidHLLMeta
 	}
@@ -49,6 +51,7 @@ func NewHLL(p uint8) (*HLL, error) {
 
 // NewFromMeta - za kreiranje iz meta bloka (sa fiksnim seed-om)
 func NewFromMeta(p uint8, seed uint32) *HLL {
+
 	m := uint64(1) << p
 	return &HLL{
 		p:    p,
@@ -60,9 +63,11 @@ func NewFromMeta(p uint8, seed uint32) *HLL {
 
 // hash funkcija
 func (hll *HLL) hash(data []byte) uint64 {
-	hasher := fnv.New64a()
 
 	// Prvo upisujemo seed (kao dodatni bajtovi)
+
+	hasher := fnv.New64a()
+
 	seedBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(seedBytes, hll.seed)
 	hasher.Write(seedBytes)
@@ -72,24 +77,39 @@ func (hll *HLL) hash(data []byte) uint64 {
 	return hasher.Sum64()
 }
 
-func firstKbits(value, k uint64) uint64 {
-	return value >> (64 - k)
+func registerIndex(value uint64, p uint8) uint64 {
+
+	mask := (uint64(1) << p) - 1
+	return value & mask
 }
 
-func trailingZeroBits(value uint64) int {
-	return bits.TrailingZeros64(value)
+func rankFromRemainder(value uint64, p uint8) int {
+
+	// Rank is rho(w): number of leading zero bits in the remainder + 1.
+	// Since index already consumes p MSB bits, the maximum rank is (64 - p + 1).
+	maxRank := 64 - int(p) + 1
+	if value == 0 {
+		return maxRank
+	}
+
+	rank := bits.TrailingZeros64(value) + 1
+	if rank > maxRank {
+		return maxRank
+	}
+	return rank
 }
 
-// Add dodaje element u HLL
 func (hll *HLL) Add(data []byte) {
+
 	hash := hll.hash(data)
 
-	// Prvih p bitova - indeks registra
-	idx := firstKbits(hash, uint64(hll.p))
+	// Use low p bits for register index. With FNV, low bits have much better
+	// spread for these key patterns than high bits.
+	idx := registerIndex(hash, hll.p)
 
-	// Ostali bitovi - za racunanje vodecih nula
-	w := hash << hll.p
-	rank := trailingZeroBits(w) + 1
+	// The remaining bits are used for rho(w).
+	w := hash >> hll.p
+	rank := rankFromRemainder(w, hll.p)
 
 	if uint8(rank) > hll.reg[idx] {
 		hll.reg[idx] = uint8(rank)
@@ -97,6 +117,7 @@ func (hll *HLL) Add(data []byte) {
 }
 
 func (hll *HLL) Estimate() float64 {
+
 	sum := 0.0
 	for _, val := range hll.reg {
 		sum += math.Pow(math.Pow(2.0, float64(val)), -1)
@@ -116,6 +137,7 @@ func (hll *HLL) Estimate() float64 {
 }
 
 func (hll *HLL) emptyCount() int {
+
 	sum := 0
 	for _, val := range hll.reg {
 		if val == 0 {
@@ -131,6 +153,7 @@ func (hll *HLL) emptyCount() int {
 // [9:13]  -> seed (4 bajta)
 // [13:]  -> registri (m bajtova)
 func (hll *HLL) Serialize() ([]byte, error) {
+
 	if hll.p == 0 || hll.m == 0 {
 		return nil, ErrInvalidHLLData
 	}
@@ -151,6 +174,7 @@ func (hll *HLL) Serialize() ([]byte, error) {
 
 // Deserialize kreira HLL iz bajtova
 func Deserialize(data []byte) (*HLL, error) {
+
 	if len(data) < 13 {
 		return nil, ErrInvalidHLLData
 	}
@@ -186,6 +210,7 @@ func Deserialize(data []byte) (*HLL, error) {
 }
 
 func Merge(ops []model.Record, p uint8, seed uint32) *HLL {
+
 	hll := NewFromMeta(p, seed)
 
 	for _, rec := range ops {
@@ -197,6 +222,7 @@ func Merge(ops []model.Record, p uint8, seed uint32) *HLL {
 }
 
 func (hll *HLL) Reset() {
+
 	for i := range hll.reg {
 		hll.reg[i] = 0
 	}
