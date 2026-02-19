@@ -259,6 +259,23 @@ func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, 
 			if crc32Val != crc32.ChecksumIEEE(data) {
 				return -1, -1, fmt.Errorf("fragment CRC32 mismatch in segment %d, block %d", i, j), 0
 			}
+
+			// Preskakanje zaostalih podataka nakog brisanja(nakon perzistiranja)
+			if len(completeData) == 0 && (fragType == FragmentMiddle || fragType == FragmentLast) {
+				offset += WALFragmentHeaderSize + int(dataLen)
+				if offset == blockSize {
+					offset = 0
+					j++
+					if j != segmentBlocks {
+						blockData, err = bm.ReadBlock(segmentPath, uint64(j), blockSize)
+						if err != nil {
+							return -1, -1, err, 0
+						}
+					}
+				}
+				continue
+			}
+
 			completeData = append(completeData, data...)
 			if (fragType == FragmentFull) || (fragType == FragmentLast) {
 				record, err := DeserializeWALRecord(completeData)
