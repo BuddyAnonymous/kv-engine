@@ -114,8 +114,7 @@ func (m *BTreeMemtable) IsFull() bool {
 }
 
 func (m *BTreeMemtable) DrainSorted() []model.Record {
-	out := make([]model.Record, 0, m.entriesNum)
-	m.inOrder(m.root, &out)
+	out := m.SnapshotSorted()
 	out = append(out, m.mergeOps...)
 	sortRecordsForFlush(out)
 
@@ -124,6 +123,13 @@ func (m *BTreeMemtable) DrainSorted() []model.Record {
 	m.mergeOps = nil
 	m.entriesNum = 0
 	m.currentBytes = 0
+	return out
+}
+
+func (m *BTreeMemtable) SnapshotSorted() []model.Record {
+	out := make([]model.Record, 0, m.entriesNum-len(m.mergeOps))
+	m.inOrder(m.root, &out)
+	sortRecordsForFlush(out)
 	return out
 }
 

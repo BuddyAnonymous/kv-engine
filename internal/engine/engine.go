@@ -36,6 +36,9 @@ type Engine struct {
 	backupMgr  *backup.BackupManager
 	seq        uint64
 	cacheEpoch uint64
+
+	iterators      map[uint64]*scanIterator
+	nextIteratorID uint64
 }
 
 func New(cfg config.Config) (*Engine, error) {
@@ -86,6 +89,7 @@ func New(cfg config.Config) (*Engine, error) {
 		lsm:        lsmTree,
 		backupMgr:  backupMgr,
 		cacheEpoch: 1,
+		iterators:  make(map[uint64]*scanIterator),
 	}
 
 	// Inicijalizuj WAL sa engine-om kao applier (replay se desava unutar NewWALManager)
@@ -110,6 +114,10 @@ func New(cfg config.Config) (*Engine, error) {
 }
 
 func (e *Engine) Put(key string, value []byte, ttl ...time.Duration) error {
+	if isInternalSystemKey(key) {
+		return fmt.Errorf("reserved internal key")
+	}
+
 	e.seq++
 	var expiresAt uint64
 	if len(ttl) > 0 {
@@ -307,7 +315,7 @@ func (e *Engine) BFGet(key string, value []byte) (bool, error) {
 		return bf.MightContain(value), nil
 	}
 
-	ops, err := e.getAllMergeOperands(model.StructureTypeBloomFilter, key)
+	ops, err := e.getAllMergeOperands(model.StructureTypeBloomFilter, key, meta.Seq)
 	if err != nil {
 		return false, err
 	}
@@ -333,7 +341,7 @@ func (e *Engine) CMSGet(key string, value []byte) (uint64, error) {
 		return sketch.Estimate(value), nil
 	}
 
-	ops, err := e.getAllMergeOperands(model.StructureTypeCountMinSketch, key)
+	ops, err := e.getAllMergeOperands(model.StructureTypeCountMinSketch, key, meta.Seq)
 	if err != nil {
 		return 0, err
 	}
@@ -356,7 +364,7 @@ func (e *Engine) HLLGet(key string) (uint64, error) {
 		return uint64(structure.Estimate()), nil
 	}
 
-	ops, err := e.getAllMergeOperands(model.StructureTypeHyperLogLog, key)
+	ops, err := e.getAllMergeOperands(model.StructureTypeHyperLogLog, key, meta.Seq)
 	if err != nil {
 		return 0, err
 	}
@@ -367,6 +375,10 @@ func (e *Engine) HLLGet(key string) (uint64, error) {
 }
 
 func (e *Engine) Delete(key string) error {
+	if isInternalSystemKey(key) {
+		return fmt.Errorf("reserved internal key")
+	}
+
 	e.seq++
 	rec := model.Record{
 		Key:       key,
@@ -383,6 +395,10 @@ func (e *Engine) Delete(key string) error {
 }
 
 func (e *Engine) Get(key string) ([]byte, bool, error) {
+	if isInternalSystemKey(key) {
+		return nil, false, nil
+	}
+
 	if val, ok := e.getKVFromCache(key); ok {
 		return val, true, nil
 	}
@@ -401,7 +417,7 @@ func (e *Engine) Get(key string) ([]byte, bool, error) {
 	}
 
 	// 2) SSTable (all levels via LSM tree)
-	val, found, err := e.lsm.Get(key)
+	rec, found, err := e.lsm.GetRecord(key)
 	if err != nil {
 		return nil, false, err
 	}
@@ -409,8 +425,8 @@ func (e *Engine) Get(key string) ([]byte, bool, error) {
 		e.invalidateKVCache(key)
 		return nil, false, nil
 	}
-	e.putKVToCache(key, val, 0, 0)
-	return val, true, nil
+	e.putKVToCache(key, rec.Value, rec.Seq, rec.ExpiresAt)
+	return rec.Value, true, nil
 }
 
 func (e *Engine) ValidateMerkle(table string) (model.MerkleValidationResult, error) {
@@ -446,7 +462,7 @@ func (e *Engine) flushMemtable() error {
 	return nil
 }
 
-func (e *Engine) getAllMergeOperands(structure model.StructureType, key string) ([]model.Record, error) {
+func (e *Engine) getAllMergeOperands(structure model.StructureType, key string, createSeq uint64) ([]model.Record, error) {
 	now := uint64(time.Now().Unix())
 	ops := make([]model.Record, 0)
 
@@ -464,6 +480,10 @@ func (e *Engine) getAllMergeOperands(structure model.StructureType, key string) 
 		if rec.ExpiresAt > 0 && rec.ExpiresAt <= now {
 			continue
 		}
+		// Skip operands from a previous create epoch.
+		if createSeq > 0 && rec.Seq < createSeq {
+			continue
+		}
 		ops = append(ops, rec)
 	}
 
@@ -471,7 +491,13 @@ func (e *Engine) getAllMergeOperands(structure model.StructureType, key string) 
 	if err != nil {
 		return nil, err
 	}
-	ops = append(ops, sstOps...)
+	// Filter SSTable operands by epoch boundary too.
+	for _, rec := range sstOps {
+		if createSeq > 0 && rec.Seq < createSeq {
+			continue
+		}
+		ops = append(ops, rec)
+	}
 
 	sort.SliceStable(ops, func(i, j int) bool {
 		if ops[i].Seq != ops[j].Seq {

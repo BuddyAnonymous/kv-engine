@@ -11,7 +11,7 @@ import (
 // At each level, if the number of SSTables reaches the threshold, all SSTables
 // are merged into one and flushed to the next level.
 // Merge operands belonging to deleted probabilistic instances are purged.
-func (t *LSMTree) sizeTieredCompaction(deleted map[instanceKey]bool) error {
+func (t *LSMTree) sizeTieredCompaction(deleted map[instanceKey]bool, epochBoundary map[instanceKey]uint64) error {
 	lastLevel := t.cfg.MaxLevels - 1
 
 	// Compact non-last levels: merge into next level.
@@ -37,7 +37,8 @@ func (t *LSMTree) sizeTieredCompaction(deleted map[instanceKey]bool) error {
 		}
 
 		merged := mergeAndDedup(batches)
-		merged = filterDeletedOperands(merged, deleted)
+		merged = filterExpiredRecords(merged)
+		merged = filterStaleOperands(merged, deleted, epochBoundary)
 
 		// Flush merged records to the next level.
 		nextDir := t.levelDir(lvl + 1)
@@ -60,7 +61,7 @@ func (t *LSMTree) sizeTieredCompaction(deleted map[instanceKey]bool) error {
 	}
 
 	// Last-level in-place compaction: merge all SSTables into one, purge tombstones.
-	if err := t.compactLastLevel(deleted); err != nil {
+	if err := t.compactLastLevel(deleted, epochBoundary); err != nil {
 		return fmt.Errorf("size-tiered: last-level: %w", err)
 	}
 
@@ -77,7 +78,7 @@ func (t *LSMTree) sizeTieredCompaction(deleted map[instanceKey]bool) error {
 //	all SSTables are merged with the next level.
 //
 // Merge operands belonging to deleted probabilistic instances are purged.
-func (t *LSMTree) leveledCompaction(deleted map[instanceKey]bool) error {
+func (t *LSMTree) leveledCompaction(deleted map[instanceKey]bool, epochBoundary map[instanceKey]uint64) error {
 	// Phase 1: L0 compaction
 	l0Dir := t.levelDir(0)
 	l0Files, err := t.sst.ListDataFilesInDir(l0Dir)
@@ -86,7 +87,7 @@ func (t *LSMTree) leveledCompaction(deleted map[instanceKey]bool) error {
 	}
 
 	if len(l0Files) >= t.cfg.LeveledL0Threshold {
-		if err := t.compactLevel(0, deleted); err != nil {
+		if err := t.compactLevel(0, deleted, epochBoundary); err != nil {
 			return fmt.Errorf("leveled: compact L0: %w", err)
 		}
 	}
@@ -101,14 +102,14 @@ func (t *LSMTree) leveledCompaction(deleted map[instanceKey]bool) error {
 		}
 
 		if currentSize > targetBytes {
-			if err := t.compactLevel(lvl, deleted); err != nil {
+			if err := t.compactLevel(lvl, deleted, epochBoundary); err != nil {
 				return fmt.Errorf("leveled: compact L%d: %w", lvl, err)
 			}
 		}
 	}
 
 	// Last-level in-place compaction.
-	if err := t.compactLastLevel(deleted); err != nil {
+	if err := t.compactLastLevel(deleted, epochBoundary); err != nil {
 		return fmt.Errorf("leveled: last-level: %w", err)
 	}
 
@@ -129,7 +130,7 @@ func (t *LSMTree) levelTargetSize(level int) int64 {
 // compactLevel merges all SSTables from the given level with all SSTables from
 // the next level. The merged result is written to the next level and old SSTables
 // from both levels are deleted.
-func (t *LSMTree) compactLevel(level int, deleted map[instanceKey]bool) error {
+func (t *LSMTree) compactLevel(level int, deleted map[instanceKey]bool, epochBoundary map[instanceKey]uint64) error {
 	srcDir := t.levelDir(level)
 	dstDir := t.levelDir(level + 1)
 
@@ -167,7 +168,8 @@ func (t *LSMTree) compactLevel(level int, deleted map[instanceKey]bool) error {
 	}
 
 	merged := mergeAndDedup(batches)
-	merged = filterDeletedOperands(merged, deleted)
+	merged = filterExpiredRecords(merged)
+	merged = filterStaleOperands(merged, deleted, epochBoundary)
 
 	// Write merged result to destination level
 	if len(merged) > 0 {
@@ -196,7 +198,7 @@ func (t *LSMTree) compactLevel(level int, deleted map[instanceKey]bool) error {
 // compactLastLevel performs in-place compaction on the last level.
 // When multiple SSTables exist at the last level, they are merged into one.
 // Since there is no lower level, tombstones and expired records are purged.
-func (t *LSMTree) compactLastLevel(deleted map[instanceKey]bool) error {
+func (t *LSMTree) compactLastLevel(deleted map[instanceKey]bool, epochBoundary map[instanceKey]uint64) error {
 	lastLevel := t.cfg.MaxLevels - 1
 	dir := t.levelDir(lastLevel)
 
@@ -221,7 +223,7 @@ func (t *LSMTree) compactLastLevel(deleted map[instanceKey]bool) error {
 
 	// Merge, purge tombstones + expired, and remove deleted instance operands.
 	merged := mergeAndDedupPurge(batches)
-	merged = filterDeletedOperands(merged, deleted)
+	merged = filterStaleOperands(merged, deleted, epochBoundary)
 
 	if len(merged) > 0 {
 		if err := t.sst.FlushToDir(dir, merged); err != nil {

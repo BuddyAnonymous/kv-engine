@@ -11,6 +11,7 @@ type Memtable interface {
 	Delete(r model.Record)
 	Get(key string) model.GetResult
 	GetMergeOperands(structure model.StructureType, key string) []model.Record
+	SnapshotSorted() []model.Record
 
 	// za flush:
 	DrainSorted() []model.Record

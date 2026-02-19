@@ -53,6 +53,11 @@ type GetResult struct {
 	Op        MergeOpType
 }
 
+type KVPair struct {
+	Key   string
+	Value []byte
+}
+
 type IndexEntry struct {
 	Key        string
 	DataOffset uint64
