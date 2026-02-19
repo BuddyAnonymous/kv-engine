@@ -905,49 +905,71 @@ func isExpired(rec model.Record, now uint64) bool {
 
 // ---------- LSM helpers ----------
 
-// ListDataFilesInDir returns .data file paths sorted newest-first from the given directory.
-func (m *Manager) ListDataFilesInDir(dir string) ([]string, error) {
-
-	pattern := filepath.Join(dir, "sst_*.data")
+// listTableRefsInDir returns table references sorted newest-first from the given directory.
+// Uses TOC files to discover both single-file and multi-file SSTables.
+func (m *Manager) listTableRefsInDir(dir string) ([]tableRef, error) {
+	pattern := filepath.Join(dir, "sst_*.toc")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return nil, err
 	}
 
-	type candidate struct {
-		path string
-		ts   int64
-		name string
-	}
-	files := make([]candidate, 0, len(matches))
-	for _, dataPath := range matches {
-		base := strings.TrimSuffix(dataPath, ".data")
-		if _, err := os.Stat(base + ".index"); err != nil {
-			continue
+	refs := make([]tableRef, 0, len(matches))
+	for _, tocPath := range matches {
+		tocMode, err := m.readTOCMode(tocPath)
+		if err != nil {
+			return nil, err
 		}
-		if _, err := os.Stat(base + ".summary"); err != nil {
+		if tocMode != tocModeMulti && tocMode != tocModeSingle {
 			continue
 		}
 
-		name := filepath.Base(dataPath)
-		files = append(files, candidate{
-			path: dataPath,
-			ts:   parseSSTTimestampFromBase(name),
-			name: name,
+		basePath := strings.TrimSuffix(tocPath, ".toc")
+		baseName := filepath.Base(basePath)
+		switch tocMode {
+		case tocModeMulti:
+			if _, err := os.Stat(basePath + ".data"); err != nil {
+				continue
+			}
+			if _, err := os.Stat(basePath + ".index"); err != nil {
+				continue
+			}
+			if _, err := os.Stat(basePath + ".summary"); err != nil {
+				continue
+			}
+		case tocModeSingle:
+			if _, err := os.Stat(basePath + ".sst"); err != nil {
+				continue
+			}
+		}
+
+		refs = append(refs, tableRef{
+			basePath: basePath,
+			baseName: baseName,
+			ts:       parseSSTTimestampFromBase(baseName),
+			mode:     tocMode,
 		})
 	}
 
-	sort.Slice(files, func(i, j int) bool {
-
-		if files[i].ts != files[j].ts {
-			return files[i].ts > files[j].ts
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].ts != refs[j].ts {
+			return refs[i].ts > refs[j].ts
 		}
-		return files[i].name > files[j].name
+		return refs[i].baseName > refs[j].baseName
 	})
+	return refs, nil
+}
 
-	out := make([]string, 0, len(files))
-	for _, f := range files {
-		out = append(out, f.path)
+// ListDataFilesInDir returns SSTable base paths sorted newest-first from the given directory.
+// Uses TOC files to discover both single-file and multi-file SSTables.
+func (m *Manager) ListDataFilesInDir(dir string) ([]string, error) {
+	refs, err := m.listTableRefsInDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, ref.basePath)
 	}
 	return out, nil
 }
@@ -957,31 +979,56 @@ func (m *Manager) ListDataFilesInDir(dir string) ([]string, error) {
 // It returns the newest KV record even when it is tombstoned/expired.
 func (m *Manager) GetLatestKVRecordFromDir(dir string, key string) (model.Record, bool, error) {
 
-	dataFiles, err := m.ListDataFilesInDir(dir)
+	refs, err := m.listTableRefsInDir(dir)
 	if err != nil {
 		return model.Record{}, false, err
 	}
-	if len(dataFiles) == 0 {
+	if len(refs) == 0 {
 		return model.Record{}, false, nil
 	}
 
-	for _, dataPath := range dataFiles {
-		maybeInFilter, err := m.maybeKeyInFilter(dataPath, key)
-		if err != nil {
-			return model.Record{}, false, err
-		}
-		if !maybeInFilter {
-			continue
-		}
+	for _, tbl := range refs {
+		switch tbl.mode {
+		case tocModeSingle:
+			singlePath := tbl.basePath + ".sst"
+			footer, blockSize, err := m.readSingleFooter(singlePath)
+			if err != nil {
+				return model.Record{}, false, err
+			}
+			maybeInFilter, err := m.maybeKeyInSingleFilter(singlePath, footer, blockSize, key)
+			if err != nil {
+				return model.Record{}, false, err
+			}
+			if !maybeInFilter {
+				continue
+			}
+			rec, found, err := m.getLatestKVFromSingleFile(singlePath, footer, blockSize, key)
+			if err != nil {
+				return model.Record{}, false, err
+			}
+			if !found {
+				continue
+			}
+			return rec, true, nil
 
-		rec, found, err := m.getLatestKVFromDataFile(dataPath, key)
-		if err != nil {
-			return model.Record{}, false, err
+		case tocModeMulti:
+			dataPath := tbl.basePath + ".data"
+			maybeInFilter, err := m.maybeKeyInFilter(dataPath, key)
+			if err != nil {
+				return model.Record{}, false, err
+			}
+			if !maybeInFilter {
+				continue
+			}
+			rec, found, err := m.getLatestKVFromDataFile(dataPath, key)
+			if err != nil {
+				return model.Record{}, false, err
+			}
+			if !found {
+				continue
+			}
+			return rec, true, nil
 		}
-		if !found {
-			continue
-		}
-		return rec, true, nil
 	}
 
 	return model.Record{}, false, nil
@@ -1007,57 +1054,130 @@ func (m *Manager) GetRecordFromDir(dir string, key string) ([]byte, bool, error)
 // GetMergeOperandsFromDir collects merge operands from all SSTables in the given directory.
 func (m *Manager) GetMergeOperandsFromDir(dir string, structure model.StructureType, key string) ([]model.Record, error) {
 
-	dataFiles, err := m.ListDataFilesInDir(dir)
+	refs, err := m.listTableRefsInDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	if len(dataFiles) == 0 {
+	if len(refs) == 0 {
 		return nil, nil
 	}
 
 	now := uint64(time.Now().Unix())
 	var ops []model.Record
 
-	for _, dataPath := range dataFiles {
-		// Bloom filter check – skip SSTable if key definitely not present.
-		maybeInFilter, err := m.maybeKeyInFilter(dataPath, key)
-		if err != nil {
-			return nil, err
-		}
-		if !maybeInFilter {
-			continue
-		}
+	for _, tbl := range refs {
+		switch tbl.mode {
+		case tocModeSingle:
+			singlePath := tbl.basePath + ".sst"
+			footer, blockSize, err := m.readSingleFooter(singlePath)
+			if err != nil {
+				return nil, err
+			}
+			err = m.scanSingleDataSection(singlePath, blockSize, footer, func(rec model.Record) (bool, error) {
+				if rec.Key < key {
+					return false, nil
+				}
+				if rec.Key > key {
+					return true, nil
+				}
+				if rec.Kind != model.RecordKindMergeOperand {
+					return false, nil
+				}
+				if rec.Structure != structure {
+					return false, nil
+				}
+				if rec.Op != model.MergeOpAdd {
+					return false, nil
+				}
+				if isExpired(rec, now) {
+					return false, nil
+				}
+				ops = append(ops, rec)
+				return false, nil
+			})
+			if err != nil {
+				return nil, err
+			}
 
-		recs, found, err := m.getKeyRecordsFromDataFile(dataPath, key)
-		if err != nil {
-			return nil, err
-		}
-		if !found {
-			continue
-		}
+		case tocModeMulti:
+			dataPath := tbl.basePath + ".data"
+			maybeInFilter, err := m.maybeKeyInFilter(dataPath, key)
+			if err != nil {
+				return nil, err
+			}
+			if !maybeInFilter {
+				continue
+			}
 
-		for _, rec := range recs {
-			if rec.Kind != model.RecordKindMergeOperand {
+			recs, found, err := m.getKeyRecordsFromDataFile(dataPath, key)
+			if err != nil {
+				return nil, err
+			}
+			if !found {
 				continue
 			}
-			if rec.Structure != structure {
-				continue
+
+			for _, rec := range recs {
+				if rec.Kind != model.RecordKindMergeOperand {
+					continue
+				}
+				if rec.Structure != structure {
+					continue
+				}
+				if rec.Op != model.MergeOpAdd {
+					continue
+				}
+				if isExpired(rec, now) {
+					continue
+				}
+				ops = append(ops, rec)
 			}
-			if rec.Op != model.MergeOpAdd {
-				continue
-			}
-			if isExpired(rec, now) {
-				continue
-			}
-			ops = append(ops, rec)
 		}
 	}
 	return ops, nil
 }
 
-// ReadAllRecordsFromFile reads all records from a .data file in sorted order.
+// ReadAllRecordsFromFile reads all records from an SSTable identified by its base path.
+// It checks the TOC to determine whether it is a single-file or multi-file SSTable.
 // This is used during compaction to merge SSTable contents.
-func (m *Manager) ReadAllRecordsFromFile(dataPath string) ([]model.Record, error) {
+func (m *Manager) ReadAllRecordsFromFile(basePath string) ([]model.Record, error) {
+
+	tocPath := basePath + ".toc"
+	mode, err := m.readTOCMode(tocPath)
+	if err != nil {
+		return nil, fmt.Errorf("read toc for %s: %w", basePath, err)
+	}
+
+	switch mode {
+	case tocModeSingle:
+		return m.readAllRecordsFromSingleFile(basePath + ".sst")
+	case tocModeMulti:
+		return m.readAllRecordsFromDataFile(basePath + ".data")
+	default:
+		return nil, fmt.Errorf("unknown toc mode %d for %s", mode, basePath)
+	}
+}
+
+// readAllRecordsFromSingleFile reads all records from a single-file SSTable.
+func (m *Manager) readAllRecordsFromSingleFile(singlePath string) ([]model.Record, error) {
+	footer, blockSize, err := m.readSingleFooter(singlePath)
+	if err != nil {
+		return nil, err
+	}
+
+	var records []model.Record
+	err = m.scanSingleDataSection(singlePath, blockSize, footer, func(rec model.Record) (bool, error) {
+		records = append(records, rec)
+		return false, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+// readAllRecordsFromDataFile reads all records from a multi-file SSTable .data file.
+func (m *Manager) readAllRecordsFromDataFile(dataPath string) ([]model.Record, error) {
 
 	dataHdr, err := m.readFileHeader(dataPath)
 	if err != nil {
@@ -1155,26 +1275,27 @@ func (m *Manager) ReadAllRecordsFromFile(dataPath string) ([]model.Record, error
 	return records, nil
 }
 
-// GetDirTotalSize returns the total size (in bytes) of all .data files in a directory.
-// Uses os.Stat which is metadata-only (no I/O through BlockManager needed for file size).
+// GetDirTotalSize returns the total size (in bytes) of all SSTable data
+// (.data and .sst) files in a directory.
 func (m *Manager) GetDirTotalSize(dir string) (int64, error) {
 
-	pattern := filepath.Join(dir, "sst_*.data")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return 0, err
-	}
-
 	var total int64
-	for _, p := range matches {
-		info, err := os.Stat(p)
+	for _, ext := range []string{"sst_*.data", "sst_*.sst"} {
+		pattern := filepath.Join(dir, ext)
+		matches, err := filepath.Glob(pattern)
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
 			return 0, err
 		}
-		total += info.Size()
+		for _, p := range matches {
+			info, err := os.Stat(p)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return 0, err
+			}
+			total += info.Size()
+		}
 	}
 	return total, nil
 }
@@ -1184,28 +1305,60 @@ func (m *Manager) GetDirTotalSize(dir string) (int64, error) {
 // When endExclusive is true, range is [startKey, endKey); otherwise [startKey, endKey].
 func (m *Manager) CollectKVRangeFromDir(dir, startKey, endKey string, endExclusive bool) ([]model.Record, error) {
 
-	dataFiles, err := m.ListDataFilesInDir(dir)
+	refs, err := m.listTableRefsInDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	if len(dataFiles) == 0 {
+	if len(refs) == 0 {
 		return nil, nil
 	}
 
 	out := make([]model.Record, 0)
-	for _, dataPath := range dataFiles {
-		blockSize, startDataBlock, endDataBlock, ok, err := m.locateDataRangeForScan(dataPath, startKey, endKey, endExclusive)
-		if err != nil {
-			return nil, err
+	for _, tbl := range refs {
+		switch tbl.mode {
+		case tocModeSingle:
+			singlePath := tbl.basePath + ".sst"
+			footer, blockSize, err := m.readSingleFooter(singlePath)
+			if err != nil {
+				return nil, err
+			}
+			err = m.scanSingleDataSection(singlePath, blockSize, footer, func(rec model.Record) (bool, error) {
+				if startKey != "" && rec.Key < startKey {
+					return false, nil
+				}
+				if endKey != "" {
+					if endExclusive && rec.Key >= endKey {
+						return true, nil
+					}
+					if !endExclusive && rec.Key > endKey {
+						return true, nil
+					}
+				}
+				if rec.Kind != model.RecordKindKV {
+					return false, nil
+				}
+				out = append(out, rec)
+				return false, nil
+			})
+			if err != nil {
+				return nil, err
+			}
+
+		case tocModeMulti:
+			dataPath := tbl.basePath + ".data"
+			blockSize, startDataBlock, endDataBlock, ok, err := m.locateDataRangeForScan(dataPath, startKey, endKey, endExclusive)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+			recs, err := m.scanDataRangeForKV(dataPath, blockSize, startDataBlock, endDataBlock, startKey, endKey, endExclusive, "")
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, recs...)
 		}
-		if !ok {
-			continue
-		}
-		recs, err := m.scanDataRangeForKV(dataPath, blockSize, startDataBlock, endDataBlock, startKey, endKey, endExclusive, "")
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, recs...)
 	}
 	return out, nil
 }
@@ -1215,34 +1368,65 @@ func (m *Manager) CollectKVPrefixFromDir(dir, prefix string) ([]model.Record, er
 
 	upper, hasUpper := prefixUpperBound(prefix)
 
-	dataFiles, err := m.ListDataFilesInDir(dir)
+	refs, err := m.listTableRefsInDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	if len(dataFiles) == 0 {
+	if len(refs) == 0 {
 		return nil, nil
 	}
 
 	out := make([]model.Record, 0)
-	for _, dataPath := range dataFiles {
-		endKey := ""
-		if hasUpper {
-			endKey = upper
-		}
+	for _, tbl := range refs {
+		switch tbl.mode {
+		case tocModeSingle:
+			singlePath := tbl.basePath + ".sst"
+			footer, blockSize, err := m.readSingleFooter(singlePath)
+			if err != nil {
+				return nil, err
+			}
+			reachedWindow := false
+			err = m.scanSingleDataSection(singlePath, blockSize, footer, func(rec model.Record) (bool, error) {
+				if rec.Key < prefix {
+					return false, nil
+				}
+				if strings.HasPrefix(rec.Key, prefix) {
+					reachedWindow = true
+					if rec.Kind == model.RecordKindKV {
+						out = append(out, rec)
+					}
+					return false, nil
+				}
+				if reachedWindow {
+					return true, nil
+				}
+				return false, nil
+			})
+			if err != nil {
+				return nil, err
+			}
 
-		blockSize, startDataBlock, endDataBlock, ok, err := m.locateDataRangeForScan(dataPath, prefix, endKey, true)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			continue
-		}
+		case tocModeMulti:
+			dataPath := tbl.basePath + ".data"
+			endKey := ""
+			if hasUpper {
+				endKey = upper
+			}
 
-		recs, err := m.scanDataRangeForKV(dataPath, blockSize, startDataBlock, endDataBlock, prefix, endKey, true, prefix)
-		if err != nil {
-			return nil, err
+			blockSize, startDataBlock, endDataBlock, ok, err := m.locateDataRangeForScan(dataPath, prefix, endKey, true)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+
+			recs, err := m.scanDataRangeForKV(dataPath, blockSize, startDataBlock, endDataBlock, prefix, endKey, true, prefix)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, recs...)
 		}
-		out = append(out, recs...)
 	}
 	return out, nil
 }

@@ -305,7 +305,7 @@ func (e *Engine) BFGet(key string, value []byte) (bool, error) {
 		return bf.MightContain(value), nil
 	}
 
-	ops, err := e.getAllMergeOperands(model.StructureTypeBloomFilter, key)
+	ops, err := e.getAllMergeOperands(model.StructureTypeBloomFilter, key, meta.Seq)
 	if err != nil {
 		return false, err
 	}
@@ -331,7 +331,7 @@ func (e *Engine) CMSGet(key string, value []byte) (uint64, error) {
 		return sketch.Estimate(value), nil
 	}
 
-	ops, err := e.getAllMergeOperands(model.StructureTypeCountMinSketch, key)
+	ops, err := e.getAllMergeOperands(model.StructureTypeCountMinSketch, key, meta.Seq)
 	if err != nil {
 		return 0, err
 	}
@@ -354,7 +354,7 @@ func (e *Engine) HLLGet(key string) (uint64, error) {
 		return uint64(structure.Estimate()), nil
 	}
 
-	ops, err := e.getAllMergeOperands(model.StructureTypeHyperLogLog, key)
+	ops, err := e.getAllMergeOperands(model.StructureTypeHyperLogLog, key, meta.Seq)
 	if err != nil {
 		return 0, err
 	}
@@ -452,7 +452,7 @@ func (e *Engine) flushMemtable() error {
 	return nil
 }
 
-func (e *Engine) getAllMergeOperands(structure model.StructureType, key string) ([]model.Record, error) {
+func (e *Engine) getAllMergeOperands(structure model.StructureType, key string, createSeq uint64) ([]model.Record, error) {
 	now := uint64(time.Now().Unix())
 	ops := make([]model.Record, 0)
 
@@ -470,6 +470,10 @@ func (e *Engine) getAllMergeOperands(structure model.StructureType, key string) 
 		if rec.ExpiresAt > 0 && rec.ExpiresAt <= now {
 			continue
 		}
+		// Skip operands from a previous create epoch.
+		if createSeq > 0 && rec.Seq < createSeq {
+			continue
+		}
 		ops = append(ops, rec)
 	}
 
@@ -477,7 +481,13 @@ func (e *Engine) getAllMergeOperands(structure model.StructureType, key string) 
 	if err != nil {
 		return nil, err
 	}
-	ops = append(ops, sstOps...)
+	// Filter SSTable operands by epoch boundary too.
+	for _, rec := range sstOps {
+		if createSeq > 0 && rec.Seq < createSeq {
+			continue
+		}
+		ops = append(ops, rec)
+	}
 
 	sort.SliceStable(ops, func(i, j int) bool {
 		if ops[i].Seq != ops[j].Seq {

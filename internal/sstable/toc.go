@@ -3,8 +3,6 @@ package sstable
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -101,54 +99,5 @@ type tableRef struct {
 }
 
 func (m *Manager) listAllTableRefsNewestFirst() ([]tableRef, error) {
-	pattern := filepath.Join(m.dir, "sst_*.toc")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil, err
-	}
-
-	refs := make([]tableRef, 0, len(matches))
-	for _, tocPath := range matches {
-		tocMode, err := m.readTOCMode(tocPath)
-		if err != nil {
-			return nil, err
-		}
-		if tocMode != tocModeMulti && tocMode != tocModeSingle {
-			continue
-		}
-
-		basePath := strings.TrimSuffix(tocPath, ".toc")
-		baseName := filepath.Base(basePath)
-		switch tocMode {
-		case tocModeMulti:
-			if _, err := os.Stat(basePath + ".data"); err != nil {
-				continue
-			}
-			if _, err := os.Stat(basePath + ".index"); err != nil {
-				continue
-			}
-			if _, err := os.Stat(basePath + ".summary"); err != nil {
-				continue
-			}
-		case tocModeSingle:
-			if _, err := os.Stat(basePath + ".sst"); err != nil {
-				continue
-			}
-		}
-
-		refs = append(refs, tableRef{
-			basePath: basePath,
-			baseName: baseName,
-			ts:       parseSSTTimestampFromBase(baseName),
-			mode:     tocMode,
-		})
-	}
-
-	sort.Slice(refs, func(i, j int) bool {
-		if refs[i].ts != refs[j].ts {
-			return refs[i].ts > refs[j].ts
-		}
-		return refs[i].baseName > refs[j].baseName
-	})
-	return refs, nil
+	return m.listTableRefsInDir(m.dir)
 }
