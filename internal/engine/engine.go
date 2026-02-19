@@ -1,13 +1,16 @@
 package engine
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
+	"kv-engine/internal/backup"
 	"kv-engine/internal/block"
 	"kv-engine/internal/cache"
 	"kv-engine/internal/config"
@@ -30,6 +33,7 @@ type Engine struct {
 	mem        memtable.MemtableManagerIface
 	sst        sstable.ManagerIface
 	lsm        *lsm.LSMTree
+	backupMgr  *backup.BackupManager
 	seq        uint64
 	cacheEpoch uint64
 }
@@ -68,6 +72,11 @@ func New(cfg config.Config) (*Engine, error) {
 		return nil, fmt.Errorf("failed to create lsm tree: %w", err)
 	}
 
+	backupMgr, err := backup.NewBackupManager(bm, cfg.BlockSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create backup manager: %w", err)
+	}
+
 	e := &Engine{
 		cfg:        cfg,
 		bm:         bm,
@@ -75,6 +84,7 @@ func New(cfg config.Config) (*Engine, error) {
 		mem:        mem,
 		sst:        sstMgr,
 		lsm:        lsmTree,
+		backupMgr:  backupMgr,
 		cacheEpoch: 1,
 	}
 
@@ -549,5 +559,120 @@ func (e *Engine) ApplyRecord(rec model.Record, fromWAL bool) error {
 		}
 	}
 
+	return nil
+}
+
+// Backup pokrece interaktivni meni za backup i restore operacije nad engine-om.
+func (e *Engine) Backup() error {
+	scanner := bufio.NewScanner(os.Stdin)
+
+	for {
+		fmt.Println("\n=== Key-Value Backup Menu ===")
+		fmt.Println("1) Napravi full backup")
+		fmt.Println("2) Napravi inkrementalni backup")
+		fmt.Println("3) Restore backupa")
+		fmt.Println("4) Lista dostupnih backup-a")
+		fmt.Println("0) Izlaz")
+		fmt.Print("Izaberi opciju: ")
+
+		if !scanner.Scan() {
+			break
+		}
+		choice := strings.TrimSpace(scanner.Text())
+
+		switch choice {
+		case "1":
+			fmt.Print("Backup ID (ostavi prazno za automatski): ")
+			scanner.Scan()
+			id := strings.TrimSpace(scanner.Text())
+			mf, err := e.backupMgr.CreateFull(backup.CreateFullRequest{
+				DataDir:    e.cfg.DataDir,
+				BackupRoot: e.cfg.BackupRoot,
+				BackupID:   id,
+			})
+			if err != nil {
+				fmt.Println("greska pri full backup-u:", err)
+				continue
+			}
+			fmt.Printf("Full backup kreiran: ID=%s, fajlova=%d\n", mf.ID, len(mf.Files))
+
+		case "2":
+			fmt.Print("Parent backup ID (ostavi prazno za poslednji): ")
+			scanner.Scan()
+			parentID := strings.TrimSpace(scanner.Text())
+
+			fmt.Print("Backup ID (ostavi prazno za automatski): ")
+			scanner.Scan()
+			id := strings.TrimSpace(scanner.Text())
+
+			mf, err := e.backupMgr.CreateIncremental(backup.CreateIncrementalRequest{
+				DataDir:    e.cfg.DataDir,
+				BackupRoot: e.cfg.BackupRoot,
+				BackupID:   id,
+				ParentID:   parentID,
+			})
+			if err != nil {
+				fmt.Println("greska pri inkrementalnom backup-u:", err)
+				continue
+			}
+			fmt.Printf("Inkrementalni backup kreiran: ID=%s, izmenjeno=%d, obrisano=%d\n", mf.ID, len(mf.Files), len(mf.Deleted))
+
+		case "3":
+			fmt.Print("Backup ID za restore: ")
+			scanner.Scan()
+			id := strings.TrimSpace(scanner.Text())
+			if id == "" {
+				fmt.Println("backup ID je obavezan")
+				continue
+			}
+
+			fmt.Println("\n⚠ UPOZORENJE: Restore ce prepisati podatke u direktorijumu:", e.cfg.DataDir)
+			fmt.Println("  Stari podaci ce biti trajno obrisani i zamenjeni sadrzajem backup-a.")
+			fmt.Print("Da li ste sigurni da zelite da nastavite? (d/n): ")
+			scanner.Scan()
+			confirm := strings.ToLower(strings.TrimSpace(scanner.Text()))
+			if confirm != "d" {
+				fmt.Println("Restore otkazan.")
+				continue
+			}
+
+			if err := e.backupMgr.Restore(backup.RestoreRequest{
+				BackupRoot:  e.cfg.BackupRoot,
+				BackupID:    id,
+				TargetDir:   e.cfg.DataDir,
+				CleanTarget: true,
+			}); err != nil {
+				fmt.Println("greska pri restore-u:", err)
+				continue
+			}
+			fmt.Println("Restore zavrsen uspesno.")
+			// Obrisati cache i memtable, i replay-ovati WAL da se podaci ucitaju u memtable nakon restore-a
+
+		case "4":
+			list, err := e.backupMgr.ListBackups(e.cfg.BackupRoot)
+			if err != nil {
+				fmt.Println("greska pri listanju:", err)
+				continue
+			}
+			if len(list) == 0 {
+				fmt.Println("Nema dostupnih backup-a.")
+				continue
+			}
+			fmt.Printf("%-40s %-14s %-26s %-20s %s\n", "ID", "Tip", "Kreiran", "Parent", "Fajlova")
+			for _, m := range list {
+				parent := m.ParentID
+				if parent == "" {
+					parent = "-"
+				}
+				fmt.Printf("%-40s %-14s %-26s %-20s %d\n", m.ID, m.Type, m.CreatedAt.Format(time.RFC3339), parent, len(m.Files))
+			}
+
+		case "0":
+			return nil
+
+		default:
+			fmt.Println("Nepoznata opcija.")
+		}
+	}
 	return nil
 }

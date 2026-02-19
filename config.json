@@ -1,5 +1,6 @@
 {
   "data_dir": "data",
+  "backup_root": "backups",
   "block_size": 4096,
   "cache_size": 8192,
   "block_cache_size": 8192,
