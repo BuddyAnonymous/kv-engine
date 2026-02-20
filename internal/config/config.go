@@ -41,6 +41,8 @@ type Config struct {
 	LSMLeveledL0Threshold     int    `json:"lsm_leveled_l0_threshold"`
 	LSMLeveledBaseSizeMB      int    `json:"lsm_leveled_base_size_mb"`
 	LSMLeveledMultiplier      int    `json:"lsm_leveled_multiplier"`
+	TokenBucketTokens   int64   `json:"token_bucket_tokens"`
+	TokenBucketInterval int64   `json:"token_bucket_interval_ms"`
 }
 
 func Default() Config {
@@ -75,6 +77,8 @@ func Default() Config {
 		LSMLeveledL0Threshold:     4,
 		LSMLeveledBaseSizeMB:      10,
 		LSMLeveledMultiplier:      10,
+		TokenBucketTokens:    100,
+		TokenBucketInterval:  1000,
 	}
 }
 
@@ -195,6 +199,12 @@ func (c *Config) Normalize() {
 	}
 	if c.LSMLeveledMultiplier < 2 {
 		c.LSMLeveledMultiplier = d.LSMLeveledMultiplier
+	}
+	if c.TokenBucketTokens <= 0 {
+		c.TokenBucketTokens = d.TokenBucketTokens
+	}
+	if c.TokenBucketInterval <= 0 {
+		c.TokenBucketInterval = d.TokenBucketInterval
 	}
 }
 

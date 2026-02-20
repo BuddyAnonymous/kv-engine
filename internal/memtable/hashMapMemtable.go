@@ -103,7 +103,29 @@ func (m *HashMapMemtable) IsFull() bool {
 	return m.entriesNum >= m.maxEntries || m.currentBytes >= m.maxBytes
 }
 
-func (m *HashMapMemtable) DrainSorted() []model.Record {
+func (m *HashMapMemtable) Clone() Memtable {
+	cloned := &HashMapMemtable{
+		maxEntries:   m.maxEntries,
+		entriesNum:   m.entriesNum,
+		maxBytes:     m.maxBytes,
+		currentBytes: m.currentBytes,
+		data:         make(map[string]model.Record, len(m.data)),
+		mergeOps:     make(map[string][]model.Record, len(m.mergeOps)),
+	}
+	for k, rec := range m.data {
+		cloned.data[k] = cloneRecord(rec)
+	}
+	for k, ops := range m.mergeOps {
+		cp := make([]model.Record, len(ops))
+		for i := range ops {
+			cp[i] = cloneRecord(ops[i])
+		}
+		cloned.mergeOps[k] = cp
+	}
+	return cloned
+}
+
+func (m *HashMapMemtable) RecordsSorted() []model.Record {
 	keys := make([]string, 0, len(m.data)+len(m.mergeOps))
 	for k := range m.data {
 		keys = append(keys, k)
@@ -126,6 +148,11 @@ func (m *HashMapMemtable) DrainSorted() []model.Record {
 		}
 	}
 	sortRecordsForFlush(out)
+	return out
+}
+
+func (m *HashMapMemtable) DrainSorted() []model.Record {
+	out := m.RecordsSorted()
 
 	m.data = make(map[string]model.Record)
 	m.mergeOps = make(map[string][]model.Record)
@@ -148,6 +175,15 @@ func (m *HashMapMemtable) SnapshotSorted() []model.Record {
 		}
 	}
 	sortRecordsForFlush(out)
+
+	return out
+}
+
+func cloneRecord(r model.Record) model.Record {
+	out := r
+	if r.Value != nil {
+		out.Value = append([]byte(nil), r.Value...)
+	}
 	return out
 }
 

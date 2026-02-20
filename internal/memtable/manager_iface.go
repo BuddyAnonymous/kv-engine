@@ -6,6 +6,10 @@ type MemtableManagerIface interface {
 	Get(key string) model.GetResult
 	GetMergeOperands(structure model.StructureType, key string) []model.Record
 	SnapshotSorted() []model.Record
+	ListLiveKeysInRange(startKey, endKey string) ([]string, error)
+	CanApplyBatchAtomically(records []model.Record) error
+	ApplyBatchAtomically(records []model.Record) error
+	ForceFlushAll() ([][]model.Record, error)
 	Put(r model.Record) (flushNeeded bool, err error)
 	Delete(r model.Record) (flushNeeded bool, err error)
 	NextFlushBatch() ([]model.Record, bool)

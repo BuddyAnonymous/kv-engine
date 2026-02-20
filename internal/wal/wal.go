@@ -84,7 +84,7 @@ func NewWALManager(dirpath string, configMaxSegmentBlocks int, configBlockSize i
 	manager.PersistedSeq = persistedSeq
 
 	// SCENARIO 1: WAL NE POSTOJI
-	// Filtriramo fajlove — ignorisemo direktorijume, non-WAL fajlove i meta fajl
+	// Filtriramo fajlove â€” ignorisemo direktorijume, non-WAL fajlove i meta fajl
 	var walFiles []os.DirEntry
 	for _, f := range files {
 		if f.IsDir() {
@@ -180,6 +180,8 @@ func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, 
 
 	var completeData []byte
 	lastSeq := uint64(0)
+	inBatch := false
+	pendingBatch := make([]model.Record, 0)
 	for i := firstID; i <= lastID; i++ {
 		segmentPath := fmt.Sprintf("%s/wal_%d.log", dirpath, i)
 		segmentHeader, err := bm.ReadAt(segmentPath, 0, WALSegmentHeaderSize)
@@ -237,6 +239,11 @@ func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, 
 				if len(completeData) > 0 {
 					return -1, -1, fmt.Errorf("incomplete WAL record before end marker in segment %d, block %d", i, j), 0
 				}
+				// Batch without COMMIT is treated as aborted transaction.
+				if inBatch {
+					pendingBatch = pendingBatch[:0]
+					inBatch = false
+				}
 				return j, offset, nil, lastSeq
 			}
 			if fragType == FragmentPadding {
@@ -282,16 +289,48 @@ func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, 
 				if err != nil {
 					return -1, -1, err, 0
 				}
-				lastSeq = record.Seq
-
-				// Preskoci zapise koji su vec perzistirani u SSTable
-				if record.Seq > persistedSeq {
-					modelRecord := record.ToRecord()
-					if err := applier.ApplyRecord(modelRecord, true); err != nil {
-						return -1, -1, fmt.Errorf("applier.ApplyRecord failed during replay: %w", err), 0
-					}
+				if record.Seq > lastSeq {
+					lastSeq = record.Seq
 				}
 
+				if IsBatchControlOpType(record.OpType) {
+					if IsBatchBeginOpType(record.OpType) {
+						if inBatch {
+							return -1, -1, fmt.Errorf("nested batch begin in WAL replay"), 0
+						}
+						inBatch = true
+						pendingBatch = pendingBatch[:0]
+					} else if IsBatchAbortOpType(record.OpType) {
+						if !inBatch {
+							return -1, -1, fmt.Errorf("batch abort without begin in WAL replay"), 0
+						}
+						pendingBatch = pendingBatch[:0]
+						inBatch = false
+					} else {
+						if !inBatch {
+							return -1, -1, fmt.Errorf("batch commit without begin in WAL replay"), 0
+						}
+						for _, rec := range pendingBatch {
+							if rec.Seq <= persistedSeq {
+								continue
+							}
+							if err := applier.ApplyRecord(rec, true); err != nil {
+								return -1, -1, fmt.Errorf("applier.ApplyRecord failed during replay: %w", err), 0
+							}
+						}
+						pendingBatch = pendingBatch[:0]
+						inBatch = false
+					}
+				} else {
+					modelRecord := record.ToRecord()
+					if inBatch {
+						pendingBatch = append(pendingBatch, modelRecord)
+					} else if record.Seq > persistedSeq {
+						if err := applier.ApplyRecord(modelRecord, true); err != nil {
+							return -1, -1, fmt.Errorf("applier.ApplyRecord failed during replay: %w", err), 0
+						}
+					}
+				}
 				completeData = nil
 				offset += WALFragmentHeaderSize + int(dataLen)
 				if offset == blockSize {
@@ -319,6 +358,7 @@ func ReplayWAL(firstID int, lastID int, dirpath string, bm *block.BlockManager, 
 	if len(completeData) > 0 {
 		return -1, -1, fmt.Errorf("incomplete WAL record at end of last segment"), 0
 	}
+	// Batch without COMMIT at end of WAL is ignored (aborted transaction).
 	return 0, 0, nil, lastSeq
 }
 
@@ -451,6 +491,30 @@ func (m *WALManager) Append(rec model.Record) error {
 	return m.Write(rec.Seq, rec.ExpiresAt, packed, []byte(rec.Key), rec.Value)
 }
 
+func (m *WALManager) AppendBatchBegin() error {
+	return m.Write(0, 0, BatchBeginOpType(), nil, nil)
+}
+
+func (m *WALManager) AppendBatchCommit() error {
+	return m.Write(0, 0, BatchCommitOpType(), nil, nil)
+}
+
+func (m *WALManager) AppendBatchAbort() error {
+	return m.Write(0, 0, BatchAbortOpType(), nil, nil)
+}
+
+func (m *WALManager) Sync() error {
+	if m.CurrentSegment == nil {
+		return fmt.Errorf("current WAL segment is not initialized")
+	}
+	f, err := os.OpenFile(m.CurrentSegment.FilePath, os.O_RDWR, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
+}
+
 func (m *WALManager) writeBytesToCurrentBlock(data []byte) error {
 	if len(data) == 0 {
 		return nil
@@ -531,7 +595,7 @@ func (m *WALManager) CheckWAL(persistedSeq uint64) error {
 			break
 		}
 
-		// Svi zapisi u ovom segmentu su vec perzistirani — obrisi ga
+		// Svi zapisi u ovom segmentu su vec perzistirani â€” obrisi ga
 		if err := os.Remove(segmentPath); err != nil {
 			return fmt.Errorf("failed to delete WAL segment %s: %w", segmentPath, err)
 		}

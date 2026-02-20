@@ -13,6 +13,12 @@ const (
 	OpPut    byte = 1
 )
 
+const (
+	batchControlMask byte = 1 << 5
+	batchBeginMask   byte = 1 << 6
+	batchAbortMask   byte = 1 << 7
+)
+
 // Bit layout za OpType (1 byte):
 //   bit 0     : op       (0=DELETE, 1=PUT)
 //   bit 1     : kind     (0=KV, 1=MergeOperand)
@@ -23,8 +29,8 @@ const (
 // PackOpType pakuje op, kind, structure i mergeOp u jedan byte.
 func PackOpType(op byte, kind model.RecordKind, structure model.StructureType, mergeOp model.MergeOpType) byte {
 	var b byte
-	b |= op & 0x01          // bit 0
-	b |= (byte(kind) & 0x01) << 1  // bit 1
+	b |= op & 0x01                     // bit 0
+	b |= (byte(kind) & 0x01) << 1      // bit 1
 	b |= (byte(structure) & 0x03) << 2 // bits 2-3
 	b |= (byte(mergeOp) & 0x01) << 4   // bit 4
 	return b
@@ -37,6 +43,34 @@ func UnpackOpType(b byte) (op byte, kind model.RecordKind, structure model.Struc
 	structure = model.StructureType((b >> 2) & 0x03)
 	mergeOp = model.MergeOpType((b >> 4) & 0x01)
 	return
+}
+
+func BatchBeginOpType() byte {
+	return batchControlMask | batchBeginMask
+}
+
+func BatchCommitOpType() byte {
+	return batchControlMask
+}
+
+func BatchAbortOpType() byte {
+	return batchControlMask | batchAbortMask
+}
+
+func IsBatchControlOpType(opType byte) bool {
+	return (opType & batchControlMask) != 0
+}
+
+func IsBatchBeginOpType(opType byte) bool {
+	return IsBatchControlOpType(opType) && (opType&batchBeginMask) != 0
+}
+
+func IsBatchAbortOpType(opType byte) bool {
+	return IsBatchControlOpType(opType) && (opType&batchAbortMask) != 0
+}
+
+func IsBatchCommitOpType(opType byte) bool {
+	return IsBatchControlOpType(opType) && !IsBatchBeginOpType(opType) && !IsBatchAbortOpType(opType)
 }
 
 type WALRecord struct {

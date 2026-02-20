@@ -33,6 +33,8 @@ Formats:
   PUT(key,value)
   PUT(key,"value with spaces")
   PUT(key,value,10s)   // TTL optional: 10s / 5m / 2h
+  BATCH_WRITE(k1,v1,k2,v2,...)
+  BATCH_WRITE(k1,v1,k2,v2,...,10s) // optional shared TTL
   BF_CREATE(key) / BF_DELETE(key)
   BF_ADD(key,value)
   BF_GET(key,value)
@@ -54,6 +56,11 @@ Formats:
   // All above also support optional ttl: CMD(key,value,10s)
   GET(key)
   DELETE(key)
+  DELETE_RANGE(startKey,endKey)
+  SNAPSHOT_CREATE()
+  SNAPSHOT_CREATE(name)
+  SNAPSHOT_GET(snapshotId,key)
+  CHECKPOINT_CREATE(name)
   MERKLE_VALIDATE(sstable_name)
   BACKUP
   EXIT
@@ -115,6 +122,29 @@ Formats:
 			}
 			fmt.Println("OK")
 
+		case "BATCH_WRITE":
+			pairs, ttl, err := parseBatchWriteArgs(args)
+			if err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			if err := eng.BatchWrite(pairs, ttl...); err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println("OK")
+
+		case "DELETE_RANGE":
+			if len(args) != 2 {
+				fmt.Println("usage: DELETE_RANGE(startKey,endKey)")
+				continue
+			}
+			if err := eng.DeleteRange(args[0], args[1]); err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println("OK")
+
 		case "MERKLE_VALIDATE":
 			if len(args) != 1 {
 				fmt.Println("usage: MERKLE_VALIDATE(sstable_name)")
@@ -131,6 +161,54 @@ Formats:
 			}
 			fmt.Printf("MERKLE MISMATCH expectedRoot=%s actualRoot=%s expectedLeaves=%d actualLeaves=%d changedLeafIndices=%v\n",
 				res.ExpectedRootHex, res.ActualRootHex, res.ExpectedLeafCount, res.ActualLeafCount, res.ChangedLeafIndices)
+
+		case "SNAPSHOT_CREATE":
+			if len(args) > 1 {
+				fmt.Println("usage: SNAPSHOT_CREATE() or SNAPSHOT_CREATE(name)")
+				continue
+			}
+			var (
+				id  string
+				err error
+			)
+			if len(args) == 1 {
+				id, err = eng.SnapshotCreate(args[0])
+			} else {
+				id, err = eng.SnapshotCreate()
+			}
+			if err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Println(id)
+
+		case "SNAPSHOT_GET":
+			if len(args) != 2 {
+				fmt.Println("usage: SNAPSHOT_GET(snapshotId,key)")
+				continue
+			}
+			val, found, err := eng.SnapshotGet(args[0], args[1])
+			if err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			if !found {
+				fmt.Println("(nil)")
+			} else {
+				fmt.Println(string(val))
+			}
+
+		case "CHECKPOINT_CREATE":
+			if len(args) != 1 {
+				fmt.Println("usage: CHECKPOINT_CREATE(name)")
+				continue
+			}
+			path, linked, err := eng.CheckpointCreate(args[0])
+			if err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Printf("path=%s linked_files=%d\n", path, linked)
 
 		case "PUT":
 			if err := runBinaryWriteCommand(args, "PUT", eng.Put); err != nil {
@@ -457,4 +535,36 @@ func printPairs(pairs []model.KVPair) {
 	for _, p := range pairs {
 		fmt.Printf("%s=%s\n", p.Key, string(p.Value))
 	}
+}
+func parseBatchWriteArgs(args []string) ([]engine.KVPair, []time.Duration, error) {
+	if len(args) < 2 {
+		return nil, nil, fmt.Errorf("usage:\n  BATCH_WRITE(k1,v1,k2,v2,...)\n  BATCH_WRITE(k1,v1,k2,v2,...,ttl)")
+	}
+
+	var (
+		durations []time.Duration
+		end       = len(args)
+	)
+
+	if len(args)%2 == 1 {
+		dur, err := time.ParseDuration(args[len(args)-1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid TTL, use 10s, 5m, 2h")
+		}
+		durations = []time.Duration{dur}
+		end = len(args) - 1
+	}
+
+	if end == 0 || end%2 != 0 {
+		return nil, nil, fmt.Errorf("batch must contain key/value pairs")
+	}
+
+	pairs := make([]engine.KVPair, 0, end/2)
+	for i := 0; i < end; i += 2 {
+		pairs = append(pairs, engine.KVPair{
+			Key:   args[i],
+			Value: []byte(args[i+1]),
+		})
+	}
+	return pairs, durations, nil
 }
