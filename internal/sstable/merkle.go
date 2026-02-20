@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"kv-engine/internal/model"
@@ -236,7 +237,71 @@ func (m *Manager) resolveSSTBasePath(table string) (string, error) {
 	if filepath.IsAbs(name) {
 		return name, nil
 	}
+
+	rootDir := filepath.Dir(m.dir)
+	candidates := make([]string, 0, 8)
+	seen := make(map[string]struct{}, 8)
+	addCandidate := func(p string) {
+		cp := filepath.Clean(p)
+		if _, ok := seen[cp]; ok {
+			return
+		}
+		seen[cp] = struct{}{}
+		candidates = append(candidates, cp)
+	}
+
+	// Try user-provided relative path as-is (from process cwd), manager dir,
+	// and SSTable root dir.
+	addCandidate(name)
+	addCandidate(filepath.Join(m.dir, name))
+	addCandidate(filepath.Join(rootDir, name))
+
+	// If only base name is provided, also search all level* directories.
+	if filepath.Base(name) == name {
+		levelDirs, err := filepath.Glob(filepath.Join(rootDir, "level*"))
+		if err != nil {
+			return "", err
+		}
+		for _, dir := range levelDirs {
+			addCandidate(filepath.Join(dir, name))
+		}
+	}
+
+	matches := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		ok, err := hasSSTableArtifacts(c)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			matches = append(matches, c)
+		}
+	}
+
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		sort.Strings(matches)
+		return "", fmt.Errorf("ambiguous sstable name %q, matches: %s", table, strings.Join(matches, ", "))
+	}
+
+	// Keep old behavior fallback for error reporting in resolveTableMode.
 	return filepath.Join(m.dir, name), nil
+}
+
+func hasSSTableArtifacts(basePath string) (bool, error) {
+	for _, ext := range []string{".toc", ".sst", ".data"} {
+		p := basePath + ext
+		_, err := os.Stat(p)
+		if err == nil {
+			return true, nil
+		}
+		if !os.IsNotExist(err) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 func (m *Manager) validateMultiFileMerkle(basePath string) (model.MerkleValidationResult, error) {

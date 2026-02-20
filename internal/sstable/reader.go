@@ -1145,6 +1145,11 @@ func (m *Manager) ReadAllRecordsFromFile(basePath string) ([]model.Record, error
 	tocPath := basePath + ".toc"
 	mode, err := m.readTOCMode(tocPath)
 	if err != nil {
+		// Missing TOC means this is an incomplete/stale table artifact
+		// (for example interrupted write/compaction). Ignore it here.
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("read toc for %s: %w", basePath, err)
 	}
 
