@@ -1100,6 +1100,187 @@ func isExpired(rec model.Record, now uint64) bool {
 
 // ---------- LSM helpers ----------
 
+// readSummaryMinMaxFromMulti reads only the min and max key from a multi-file summary.
+// Reads a single block.
+func (m *Manager) readSummaryMinMaxFromMulti(basePath string) (string, string, error) {
+	summaryPath := basePath + ".summary"
+	hdr, err := m.readFileHeader(summaryPath)
+	if err != nil {
+		return "", "", err
+	}
+	payload0, err := m.readPayloadBlock(summaryPath, hdr.blockSize, 0)
+	if err != nil {
+		return "", "", err
+	}
+	if len(payload0) < 8 {
+		return "", "", fmt.Errorf("summary header too short: %s", summaryPath)
+	}
+	if string(payload0[:4]) != string(m.summMagic[:]) {
+		return "", "", fmt.Errorf("invalid summary magic in %s", summaryPath)
+	}
+	off := 8
+	// skip stride
+	if _, err := readUvarintAt(payload0, &off); err != nil {
+		return "", "", err
+	}
+	minLen, err := readUvarintAt(payload0, &off)
+	if err != nil {
+		return "", "", err
+	}
+	minLenI, err := checkedChunkLen(minLen, len(payload0)-off, "summary minKey")
+	if err != nil {
+		return "", "", err
+	}
+	minKey := string(payload0[off : off+minLenI])
+	off += minLenI
+	maxLen, err := readUvarintAt(payload0, &off)
+	if err != nil {
+		return "", "", err
+	}
+	maxLenI, err := checkedChunkLen(maxLen, len(payload0)-off, "summary maxKey")
+	if err != nil {
+		return "", "", err
+	}
+	maxKey := string(payload0[off : off+maxLenI])
+	return minKey, maxKey, nil
+}
+
+// readSummaryMinMaxFromSingle reads only the min and max key from a single-file SSTable's summary section.
+func (m *Manager) readSummaryMinMaxFromSingle(singlePath string, footer singleFileFooter, blockSize int) (string, string, error) {
+	if footer.SummaryLen == 0 {
+		return "", "", fmt.Errorf("single file has empty summary section: %s", singlePath)
+	}
+	payload0, err := m.readPayloadBlock(singlePath, blockSize, footer.SummaryOffset)
+	if err != nil {
+		return "", "", err
+	}
+	if len(payload0) < 8 {
+		return "", "", fmt.Errorf("single summary header too short in %s", singlePath)
+	}
+	if string(payload0[:4]) != string(m.summMagic[:]) {
+		return "", "", fmt.Errorf("invalid single summary magic in %s", singlePath)
+	}
+	off := 8
+	// skip stride
+	if _, err := readUvarintAt(payload0, &off); err != nil {
+		return "", "", err
+	}
+	minLen, err := readUvarintAt(payload0, &off)
+	if err != nil {
+		return "", "", err
+	}
+	minLenI, err := checkedChunkLen(minLen, len(payload0)-off, "single summary minKey")
+	if err != nil {
+		return "", "", err
+	}
+	minKey := string(payload0[off : off+minLenI])
+	off += minLenI
+	maxLen, err := readUvarintAt(payload0, &off)
+	if err != nil {
+		return "", "", err
+	}
+	maxLenI, err := checkedChunkLen(maxLen, len(payload0)-off, "single summary maxKey")
+	if err != nil {
+		return "", "", err
+	}
+	maxKey := string(payload0[off : off+maxLenI])
+	return minKey, maxKey, nil
+}
+
+// getTableKeyRange returns the min and max key for a given table reference.
+// This is a lightweight read that only decodes the summary header block.
+func (m *Manager) getTableKeyRange(tbl tableRef) (string, string, error) {
+	switch tbl.mode {
+	case tocModeMulti:
+		return m.readSummaryMinMaxFromMulti(tbl.basePath)
+	case tocModeSingle:
+		singlePath := tbl.basePath + ".sst"
+		footer, blockSize, err := m.readSingleFooter(singlePath)
+		if err != nil {
+			return "", "", err
+		}
+		return m.readSummaryMinMaxFromSingle(singlePath, footer, blockSize)
+	default:
+		return "", "", fmt.Errorf("unknown table mode: %d", tbl.mode)
+	}
+}
+
+// GetLatestKVRecordFromDirLeveled searches for a key in a leveled-compaction directory
+// (L1+) where key ranges across SSTables are non-overlapping.
+// It first checks each table's summary key range to skip tables that cannot contain
+// the key, then falls back to bloom filter + full lookup only for matching tables.
+func (m *Manager) GetLatestKVRecordFromDirLeveled(dir string, key string) (model.Record, bool, error) {
+	refs, err := m.listTableRefsInDir(dir)
+	if err != nil {
+		return model.Record{}, false, err
+	}
+	if len(refs) == 0 {
+		return model.Record{}, false, nil
+	}
+
+	// On leveled L1+, key ranges don't overlap — at most one table contains the key.
+	// Filter by summary min/max key range first (cheap single-block read).
+	for _, tbl := range refs {
+		minKey, maxKey, err := m.getTableKeyRange(tbl)
+		if err != nil {
+			// If we can't read the range, fall through to standard search for this table.
+			continue
+		}
+		if minKey != "" && key < minKey {
+			continue
+		}
+		if maxKey != "" && key > maxKey {
+			continue
+		}
+
+		// Key is within this table's range — check bloom filter and read.
+		switch tbl.mode {
+		case tocModeSingle:
+			singlePath := tbl.basePath + ".sst"
+			footer, blockSize, err := m.readSingleFooter(singlePath)
+			if err != nil {
+				return model.Record{}, false, err
+			}
+			maybeInFilter, err := m.maybeKeyInSingleFilter(singlePath, footer, blockSize, key)
+			if err != nil {
+				return model.Record{}, false, err
+			}
+			if !maybeInFilter {
+				continue
+			}
+			rec, found, err := m.getLatestKVFromSingleFile(singlePath, footer, blockSize, key)
+			if err != nil {
+				return model.Record{}, false, err
+			}
+			if found {
+				return rec, true, nil
+			}
+
+		case tocModeMulti:
+			dataPath := tbl.basePath + ".data"
+			maybeInFilter, err := m.maybeKeyInFilter(dataPath, key)
+			if err != nil {
+				return model.Record{}, false, err
+			}
+			if !maybeInFilter {
+				continue
+			}
+			rec, found, err := m.getLatestKVFromDataFile(dataPath, key)
+			if err != nil {
+				return model.Record{}, false, err
+			}
+			if found {
+				return rec, true, nil
+			}
+		}
+
+		// Non-overlapping ranges: if the key was in range but not found, it doesn't exist.
+		return model.Record{}, false, nil
+	}
+
+	return model.Record{}, false, nil
+}
+
 // listTableRefsInDir returns table references sorted newest-first from the given directory.
 // Uses TOC files to discover both single-file and multi-file SSTables.
 func (m *Manager) listTableRefsInDir(dir string) ([]tableRef, error) {
