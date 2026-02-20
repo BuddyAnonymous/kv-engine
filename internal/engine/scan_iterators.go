@@ -148,7 +148,7 @@ func (e *Engine) collectVisibleSortedPairsFromSources(memFilter func(string) boo
 		if rec.Kind != model.RecordKindKV {
 			continue
 		}
-		if isInternalSystemKey(rec.Key) {
+		if isInternalKey(rec.Key) {
 			continue
 		}
 		if memFilter != nil && !memFilter(rec.Key) {

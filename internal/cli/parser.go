@@ -17,9 +17,9 @@ func ParseCall(line string) (string, []string, bool, string) {
 		return "", nil, false, ""
 	}
 
-	// allow EXIT/QUIT without parentheses
+	// allow selected commands without parentheses
 	up := strings.ToUpper(line)
-	if up == "EXIT" || up == "QUIT" {
+	if up == "EXIT" || up == "QUIT" || up == "BACKUP" {
 		return up, nil, true, ""
 	}
 
