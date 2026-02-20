@@ -503,18 +503,6 @@ func (m *WALManager) AppendBatchAbort() error {
 	return m.Write(0, 0, BatchAbortOpType(), nil, nil)
 }
 
-func (m *WALManager) Sync() error {
-	if m.CurrentSegment == nil {
-		return fmt.Errorf("current WAL segment is not initialized")
-	}
-	f, err := os.OpenFile(m.CurrentSegment.FilePath, os.O_RDWR, 0644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
-}
-
 func (m *WALManager) writeBytesToCurrentBlock(data []byte) error {
 	if len(data) == 0 {
 		return nil

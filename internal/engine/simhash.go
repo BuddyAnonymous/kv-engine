@@ -23,6 +23,9 @@ func (e *Engine) SimHashStore(name, text string) error {
 	if name == "" {
 		return fmt.Errorf("simhash key is empty")
 	}
+	if err := e.allowRequest(1); err != nil {
+		return err
+	}
 
 	sh := simhash.NewSimHash(text)
 	payload, err := sh.Serialize()
@@ -50,6 +53,13 @@ func (e *Engine) SimHashStore(name, text string) error {
 }
 
 func (e *Engine) SimHashGet(name string) (uint64, bool, error) {
+	if err := e.allowRequest(1); err != nil {
+		return 0, false, err
+	}
+	return e.simHashGetNoRateLimit(name)
+}
+
+func (e *Engine) simHashGetNoRateLimit(name string) (uint64, bool, error) {
 	if name == "" {
 		return 0, false, fmt.Errorf("simhash key is empty")
 	}
@@ -95,7 +105,11 @@ func (e *Engine) SimHashGet(name string) (uint64, bool, error) {
 }
 
 func (e *Engine) SimHashDistance(name1, name2 string) (int, error) {
-	fp1, found1, err := e.SimHashGet(name1)
+	if err := e.allowRequest(1); err != nil {
+		return 0, err
+	}
+
+	fp1, found1, err := e.simHashGetNoRateLimit(name1)
 	if err != nil {
 		return 0, err
 	}
@@ -103,7 +117,7 @@ func (e *Engine) SimHashDistance(name1, name2 string) (int, error) {
 		return 0, fmt.Errorf("simhash instance not found: %s", name1)
 	}
 
-	fp2, found2, err := e.SimHashGet(name2)
+	fp2, found2, err := e.simHashGetNoRateLimit(name2)
 	if err != nil {
 		return 0, err
 	}

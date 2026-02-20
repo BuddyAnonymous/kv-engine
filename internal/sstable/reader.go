@@ -103,9 +103,6 @@ func (m *Manager) Get(key string) ([]byte, bool, error) {
 }
 
 func (m *Manager) ListLiveKeysInRange(startKey, endKey string) ([]string, error) {
-	if !m.multiFileSSTable {
-		return nil, fmt.Errorf("single-file sstable range listing is not implemented")
-	}
 	if startKey == "" || endKey == "" {
 		return nil, fmt.Errorf("range keys must not be empty")
 	}
@@ -113,11 +110,11 @@ func (m *Manager) ListLiveKeysInRange(startKey, endKey string) ([]string, error)
 		return nil, fmt.Errorf("invalid range: start key must be <= end key")
 	}
 
-	dataFiles, err := m.listDataFilesNewestFirst()
+	tables, err := m.listAllTableRefsNewestFirst()
 	if err != nil {
 		return nil, err
 	}
-	if len(dataFiles) == 0 {
+	if len(tables) == 0 {
 		return nil, nil
 	}
 
@@ -129,8 +126,16 @@ func (m *Manager) ListLiveKeysInRange(startKey, endKey string) ([]string, error)
 
 	now := uint64(time.Now().Unix())
 	stateByKey := make(map[string]keyState)
-	for _, dataPath := range dataFiles {
-		recs, err := m.listKVRecordsFromDataFileInRange(dataPath, startKey, endKey)
+	for _, tbl := range tables {
+		var recs []model.Record
+		switch tbl.mode {
+		case tocModeSingle:
+			recs, err = m.listKVRecordsFromSingleFileInRange(tbl.basePath+".sst", startKey, endKey)
+		case tocModeMulti:
+			recs, err = m.listKVRecordsFromDataFileInRange(tbl.basePath+".data", startKey, endKey)
+		default:
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -156,6 +161,31 @@ func (m *Manager) ListLiveKeysInRange(startKey, endKey string) ([]string, error)
 	}
 	sort.Strings(keys)
 	return keys, nil
+}
+
+func (m *Manager) listKVRecordsFromSingleFileInRange(singlePath, startKey, endKey string) ([]model.Record, error) {
+	footer, blockSize, err := m.readSingleFooter(singlePath)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]model.Record, 0)
+	err = m.scanSingleDataSection(singlePath, blockSize, footer, func(rec model.Record) (bool, error) {
+		if rec.Key < startKey {
+			return false, nil
+		}
+		if rec.Key > endKey {
+			return true, nil
+		}
+		if rec.Kind == model.RecordKindKV {
+			out = append(out, rec)
+		}
+		return false, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (m *Manager) listDataFilesNewestFirst() ([]string, error) {

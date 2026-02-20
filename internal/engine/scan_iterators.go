@@ -14,6 +14,9 @@ type scanIterator struct {
 }
 
 func (e *Engine) PrefixScan(prefix string, pageNumber, pageSize int) ([]model.KVPair, error) {
+	if err := e.allowRequest(1); err != nil {
+		return nil, err
+	}
 
 	if pageNumber < 1 {
 		return nil, fmt.Errorf("pageNumber must be >= 1")
@@ -30,6 +33,9 @@ func (e *Engine) PrefixScan(prefix string, pageNumber, pageSize int) ([]model.KV
 }
 
 func (e *Engine) RangeScan(minKey, maxKey string, pageNumber, pageSize int) ([]model.KVPair, error) {
+	if err := e.allowRequest(1); err != nil {
+		return nil, err
+	}
 
 	if pageNumber < 1 {
 		return nil, fmt.Errorf("pageNumber must be >= 1")
@@ -49,6 +55,9 @@ func (e *Engine) RangeScan(minKey, maxKey string, pageNumber, pageSize int) ([]m
 }
 
 func (e *Engine) PrefixIterate(prefix string) (uint64, error) {
+	if err := e.allowRequest(1); err != nil {
+		return 0, err
+	}
 
 	all, err := e.collectVisibleSortedPairsByPrefix(prefix)
 	if err != nil {
@@ -58,6 +67,9 @@ func (e *Engine) PrefixIterate(prefix string) (uint64, error) {
 }
 
 func (e *Engine) RangeIterate(minKey, maxKey string) (uint64, error) {
+	if err := e.allowRequest(1); err != nil {
+		return 0, err
+	}
 
 	if minKey > maxKey {
 		return 0, fmt.Errorf("invalid range: minKey > maxKey")
@@ -70,6 +82,9 @@ func (e *Engine) RangeIterate(minKey, maxKey string) (uint64, error) {
 }
 
 func (e *Engine) IteratorNext(id uint64) (model.KVPair, bool, error) {
+	if err := e.allowRequest(1); err != nil {
+		return model.KVPair{}, false, err
+	}
 
 	it, ok := e.iterators[id]
 	if !ok {
@@ -84,6 +99,9 @@ func (e *Engine) IteratorNext(id uint64) (model.KVPair, bool, error) {
 }
 
 func (e *Engine) IteratorStop(id uint64) error {
+	if err := e.allowRequest(1); err != nil {
+		return err
+	}
 
 	if _, ok := e.iterators[id]; !ok {
 		return fmt.Errorf("iterator not found")

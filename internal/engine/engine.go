@@ -162,7 +162,7 @@ func (e *Engine) appendHistory(rec model.Record) {
 	e.history[rec.Key] = append(e.history[rec.Key], rec)
 }
 
-func (e *Engine) captureBaselineIfNeeded(key string, beforeSeq uint64) (model.Record, bool, error) {
+func (e *Engine) captureBaselineIfNeeded(key string) (model.Record, bool, error) {
 	if key == "" || isInternalKey(key) {
 		return model.Record{}, false, nil
 	}
@@ -178,7 +178,9 @@ func (e *Engine) captureBaselineIfNeeded(key string, beforeSeq uint64) (model.Re
 			Key:       key,
 			Value:     append([]byte(nil), val...),
 			Tombstone: false,
-			Seq:       beforeSeq,
+			// Baseline represents state before first tracked mutation in this process.
+			// It must be visible to all snapshot sequence values.
+			Seq:       0,
 			ExpiresAt: 0,
 			Kind:      model.RecordKindKV,
 			Structure: model.StructureTypeNone,
@@ -190,7 +192,8 @@ func (e *Engine) captureBaselineIfNeeded(key string, beforeSeq uint64) (model.Re
 		Key:       key,
 		Value:     nil,
 		Tombstone: true,
-		Seq:       beforeSeq,
+		// Baseline "not found" state must also be visible to all snapshots.
+		Seq:       0,
 		ExpiresAt: 0,
 		Kind:      model.RecordKindKV,
 		Structure: model.StructureTypeNone,
@@ -229,7 +232,14 @@ func (e *Engine) getRaw(key string) ([]byte, bool, error) {
 		}
 		return r.Value, true, nil
 	}
-	return e.sst.Get(key)
+	rec, found, err := e.lsm.GetRecord(key)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return nil, false, nil
+	}
+	return rec.Value, true, nil
 }
 
 func (e *Engine) initTokenBucket() error {
@@ -268,9 +278,6 @@ func (e *Engine) persistTokenBucketState() (bool, error) {
 		Op:        model.MergeOpNone,
 	}
 	if err := e.wal.Append(rec); err != nil {
-		return false, err
-	}
-	if err := e.wal.Sync(); err != nil {
 		return false, err
 	}
 	if e.testHookAfterTokenBucketSync != nil {
@@ -885,22 +892,12 @@ func (e *Engine) CheckpointCreate(name ...string) (string, int, error) {
 	if err := e.allowRequest(1); err != nil {
 		return "", 0, err
 	}
-	if e.wal != nil {
-		if err := e.wal.Sync(); err != nil {
-			return "", 0, err
-		}
-	}
 
 	e.stateMu.Lock()
 	defer e.stateMu.Unlock()
 
 	if err := e.forceFlushAllMemtables(); err != nil {
 		return "", 0, err
-	}
-	if e.wal != nil {
-		if err := e.wal.Sync(); err != nil {
-			return "", 0, err
-		}
 	}
 
 	checkpointsDir := filepath.Join(e.cfg.DataDir, "checkpoints")
@@ -1193,7 +1190,7 @@ func (e *Engine) ApplyRecord(rec model.Record, fromWAL bool) error {
 			return err
 		}
 	}
-	baseline, hasBaseline, err := e.captureBaselineIfNeeded(rec.Key, rec.Seq-1)
+	baseline, hasBaseline, err := e.captureBaselineIfNeeded(rec.Key)
 	if err != nil {
 		return err
 	}
@@ -1241,28 +1238,22 @@ func (e *Engine) applyBatchRecords(records []model.Record) error {
 	if e.testHookAfterBatchBegin != nil {
 		if err := e.testHookAfterBatchBegin(); err != nil {
 			_ = e.wal.AppendBatchAbort()
-			_ = e.wal.Sync()
 			return err
 		}
 	}
 	for _, rec := range records {
 		if err := e.wal.Append(rec); err != nil {
 			_ = e.wal.AppendBatchAbort()
-			_ = e.wal.Sync()
 			return err
 		}
 	}
 	if err := e.wal.AppendBatchCommit(); err != nil {
 		if inBatch && !committed {
 			_ = e.wal.AppendBatchAbort()
-			_ = e.wal.Sync()
 		}
 		return err
 	}
 	committed = true
-	if err := e.wal.Sync(); err != nil {
-		return err
-	}
 	if e.testHookAfterBatchSync != nil {
 		if err := e.testHookAfterBatchSync(); err != nil {
 			return err
@@ -1279,8 +1270,8 @@ func (e *Engine) applyBatchRecords(records []model.Record) error {
 		}
 	}
 	baselines := make([]model.Record, 0, len(firstSeqByKey))
-	for key, firstSeq := range firstSeqByKey {
-		baseline, ok, err := e.captureBaselineIfNeeded(key, firstSeq-1)
+	for key := range firstSeqByKey {
+		baseline, ok, err := e.captureBaselineIfNeeded(key)
 		if err != nil {
 			return err
 		}
@@ -1335,6 +1326,10 @@ func (e *Engine) Backup() error {
 
 		switch choice {
 		case "1":
+			if err := e.allowRequest(1); err != nil {
+				fmt.Println("rate limit error:", err)
+				continue
+			}
 			fmt.Print("Backup ID (ostavi prazno za automatski): ")
 			scanner.Scan()
 			id := strings.TrimSpace(scanner.Text())
@@ -1350,6 +1345,10 @@ func (e *Engine) Backup() error {
 			fmt.Printf("Full backup kreiran: ID=%s, fajlova=%d\n", mf.ID, len(mf.Files))
 
 		case "2":
+			if err := e.allowRequest(1); err != nil {
+				fmt.Println("rate limit error:", err)
+				continue
+			}
 			fmt.Print("Parent backup ID (ostavi prazno za poslednji): ")
 			scanner.Scan()
 			parentID := strings.TrimSpace(scanner.Text())
@@ -1371,6 +1370,10 @@ func (e *Engine) Backup() error {
 			fmt.Printf("Inkrementalni backup kreiran: ID=%s, izmenjeno=%d, obrisano=%d\n", mf.ID, len(mf.Files), len(mf.Deleted))
 
 		case "3":
+			if err := e.allowRequest(1); err != nil {
+				fmt.Println("rate limit error:", err)
+				continue
+			}
 			fmt.Print("Backup ID za restore: ")
 			scanner.Scan()
 			id := strings.TrimSpace(scanner.Text())
@@ -1405,6 +1408,10 @@ func (e *Engine) Backup() error {
 			fmt.Println("Restore zavrsen uspesno.")
 
 		case "4":
+			if err := e.allowRequest(1); err != nil {
+				fmt.Println("rate limit error:", err)
+				continue
+			}
 			list, err := e.backupMgr.ListBackups(e.cfg.BackupRoot)
 			if err != nil {
 				fmt.Println("greska pri listanju:", err)
