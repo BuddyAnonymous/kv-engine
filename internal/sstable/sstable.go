@@ -100,29 +100,4 @@ func (m *Manager) DeleteSSTable(basePath string) error {
 	return nil
 }
 
-// Dir returns the directory this manager writes to.
-func (m *Manager) Dir() string {
-	return m.dir
-}
-
-// BlockManagerRef returns the underlying block manager.
-func (m *Manager) BlockManagerRef() *block.BlockManager {
-	return m.bm
-}
-
-// BlockSize returns the configured block size.
-func (m *Manager) BlockSizeVal() int {
-	return m.blockSize
-}
-
-// SummaryStrideVal returns the configured summary stride.
-func (m *Manager) SummaryStrideVal() uint64 {
-	return m.summaryStride
-}
-
-// MultiFile returns whether this manager uses multi-file SSTables.
-func (m *Manager) MultiFile() bool {
-	return m.multiFileSSTable
-}
-
 var _ ManagerIface = (*Manager)(nil)

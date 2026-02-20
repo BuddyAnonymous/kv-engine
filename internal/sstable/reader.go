@@ -188,21 +188,6 @@ func (m *Manager) listKVRecordsFromSingleFileInRange(singlePath, startKey, endKe
 	return out, nil
 }
 
-func (m *Manager) listDataFilesNewestFirst() ([]string, error) {
-	tables, err := m.listAllTableRefsNewestFirst()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(tables))
-	for _, tbl := range tables {
-		if tbl.mode != tocModeMulti {
-			continue
-		}
-		out = append(out, tbl.basePath+".data")
-	}
-	return out, nil
-}
-
 func (m *Manager) GetMergeOperands(structure model.StructureType, key string) ([]model.Record, error) {
 
 	if structure == model.StructureTypeNone {

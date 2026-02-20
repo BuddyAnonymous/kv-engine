@@ -727,43 +727,19 @@ func (e *Engine) DeleteRange(startKey, endKey string) error {
 		return fmt.Errorf("invalid range: start key must be <= end key")
 	}
 
-	memKeys, err := e.mem.ListLiveKeysInRange(startKey, endKey)
+	visible, err := e.collectVisibleSortedPairsByRange(startKey, endKey)
 	if err != nil {
 		return err
 	}
-	sstKeys, err := e.sst.ListLiveKeysInRange(startKey, endKey)
-	if err != nil {
-		return err
-	}
-
-	keySet := make(map[string]struct{}, len(memKeys)+len(sstKeys))
-	for _, k := range memKeys {
-		if isInternalKey(k) {
-			continue
-		}
-		keySet[k] = struct{}{}
-	}
-	for _, k := range sstKeys {
-		if isInternalKey(k) {
-			continue
-		}
-		keySet[k] = struct{}{}
-	}
-	if len(keySet) == 0 {
+	if len(visible) == 0 {
 		return e.allowRequest(1)
 	}
 
-	keys := make([]string, 0, len(keySet))
-	for k := range keySet {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	records := make([]model.Record, 0, len(keys))
-	for _, key := range keys {
+	records := make([]model.Record, 0, len(visible))
+	for _, pair := range visible {
 		e.seq++
 		records = append(records, model.Record{
-			Key:       key,
+			Key:       pair.Key,
 			Value:     nil,
 			Tombstone: true,
 			Seq:       e.seq,
@@ -773,7 +749,7 @@ func (e *Engine) DeleteRange(startKey, endKey string) error {
 			Op:        model.MergeOpNone,
 		})
 	}
-	return e.withRateLimitRollbackOnError(int64(len(keySet)), func() error {
+	return e.withRateLimitRollbackOnError(int64(len(records)), func() error {
 		return e.applyBatchRecords(records)
 	})
 }
@@ -1185,10 +1161,12 @@ func (e *Engine) ApplyRecord(rec model.Record, fromWAL bool) error {
 		e.seq = rec.Seq
 	}
 
-	if !fromWAL {
-		if err := e.wal.Append(rec); err != nil {
-			return err
-		}
+	if fromWAL {
+		return e.applyRecordToMem(rec)
+	}
+
+	if err := e.wal.Append(rec); err != nil {
+		return err
 	}
 	baseline, hasBaseline, err := e.captureBaselineIfNeeded(rec.Key)
 	if err != nil {
@@ -1201,17 +1179,16 @@ func (e *Engine) ApplyRecord(rec model.Record, fromWAL bool) error {
 		e.appendHistory(baseline)
 	}
 	e.appendHistory(rec)
-	if !fromWAL {
-		if rec.Kind == model.RecordKindKV {
-			if rec.Tombstone || (rec.ExpiresAt > 0 && rec.ExpiresAt <= uint64(time.Now().Unix())) {
-				e.invalidateKVCache(rec.Key)
-			} else {
-				e.putKVToCache(rec.Key, rec.Value, rec.Seq, rec.ExpiresAt)
-			}
+
+	if rec.Kind == model.RecordKindKV {
+		if rec.Tombstone || (rec.ExpiresAt > 0 && rec.ExpiresAt <= uint64(time.Now().Unix())) {
+			e.invalidateKVCache(rec.Key)
 		} else {
-			if !e.updateStructureCacheOnMergeAdd(rec) {
-				e.invalidateStructureCache(rec.Structure, rec.Key)
-			}
+			e.putKVToCache(rec.Key, rec.Value, rec.Seq, rec.ExpiresAt)
+		}
+	} else {
+		if !e.updateStructureCacheOnMergeAdd(rec) {
+			e.invalidateStructureCache(rec.Structure, rec.Key)
 		}
 	}
 	return nil
