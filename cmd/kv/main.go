@@ -48,6 +48,7 @@ Formats:
   SNAPSHOT_CREATE()
   SNAPSHOT_CREATE(name)
   SNAPSHOT_GET(snapshotId,key)
+  CHECKPOINT_CREATE(name)
   MERKLE_VALIDATE(sstable_name)
   EXIT
 `)
@@ -177,6 +178,18 @@ Formats:
 			} else {
 				fmt.Println(string(val))
 			}
+
+		case "CHECKPOINT_CREATE":
+			if len(args) != 1 {
+				fmt.Println("usage: CHECKPOINT_CREATE(name)")
+				continue
+			}
+			path, linked, err := eng.CheckpointCreate(args[0])
+			if err != nil {
+				fmt.Println("error:", err)
+				continue
+			}
+			fmt.Printf("path=%s linked_files=%d\n", path, linked)
 
 		case "PUT":
 			if err := runBinaryWriteCommand(args, "PUT", eng.Put); err != nil {

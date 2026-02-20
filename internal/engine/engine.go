@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"kv-engine/internal/block"
@@ -34,6 +35,7 @@ type Engine struct {
 
 	snapshots   map[string]snapshotPoint
 	snapshotCtr uint64
+	stateMu     sync.Mutex
 
 	// Test hooks (nil in production).
 	testHookAfterTokenBucketSync func() error
@@ -158,6 +160,9 @@ func (e *Engine) captureBaselineIfNeeded(key string, beforeSeq uint64) (model.Re
 }
 
 func (e *Engine) applyRecordToMem(rec model.Record) error {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+
 	var (
 		flushNeeded bool
 		err         error
@@ -765,6 +770,147 @@ func (e *Engine) SnapshotGet(snapshotID, key string) ([]byte, bool, error) {
 	return nil, false, nil
 }
 
+func (e *Engine) CheckpointCreate(name ...string) (string, int, error) {
+	cpName := ""
+	if len(name) > 0 {
+		cpName = strings.TrimSpace(name[0])
+		if cpName == "" {
+			return "", 0, fmt.Errorf("checkpoint name must not be empty")
+		}
+		if cpName != filepath.Base(cpName) {
+			return "", 0, fmt.Errorf("checkpoint name must not contain path separators")
+		}
+	} else {
+		cpName = fmt.Sprintf("checkpoint-%d", time.Now().UnixNano())
+	}
+	if err := e.allowRequest(1); err != nil {
+		return "", 0, err
+	}
+	if e.wal != nil {
+		if err := e.wal.Sync(); err != nil {
+			return "", 0, err
+		}
+	}
+
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+
+	if err := e.forceFlushAllMemtables(); err != nil {
+		return "", 0, err
+	}
+	if e.wal != nil {
+		if err := e.wal.Sync(); err != nil {
+			return "", 0, err
+		}
+	}
+
+	checkpointsDir := filepath.Join(e.cfg.DataDir, "checkpoints")
+	destRoot := filepath.Join(checkpointsDir, cpName)
+	if _, err := os.Stat(destRoot); err == nil {
+		return "", 0, fmt.Errorf("checkpoint %s already exists", cpName)
+	}
+	if err := os.MkdirAll(destRoot, 0755); err != nil {
+		return "", 0, err
+	}
+
+	files, err := e.listCheckpointFiles()
+	if err != nil {
+		return "", 0, err
+	}
+	linked := 0
+	for _, entry := range files {
+		target := filepath.Join(destRoot, entry.relDest)
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return "", 0, err
+		}
+		if err := os.Link(entry.src, target); err != nil {
+			return "", 0, err
+		}
+		linked++
+	}
+	return destRoot, linked, nil
+}
+
+func (e *Engine) forceFlushAllMemtables() error {
+	batches, err := e.mem.ForceFlushAll()
+	if err != nil {
+		return err
+	}
+	for _, recs := range batches {
+		if len(recs) == 0 {
+			continue
+		}
+		if err := e.sst.Flush(recs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type checkpointFile struct {
+	src     string
+	relDest string
+}
+
+func (e *Engine) listCheckpointFiles() ([]checkpointFile, error) {
+	out := make([]checkpointFile, 0)
+
+	// 1) All SSTable files.
+	sstRoot := filepath.Join(e.cfg.DataDir, "sstable")
+	if _, err := os.Stat(sstRoot); err == nil {
+		err = filepath.WalkDir(sstRoot, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !d.Type().IsRegular() {
+				return nil
+			}
+			rel, err := filepath.Rel(sstRoot, path)
+			if err != nil {
+				return err
+			}
+			out = append(out, checkpointFile{
+				src:     path,
+				relDest: filepath.Join("sstable", rel),
+			})
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	// 2) Optional manifest files in data root.
+	manifestCandidates := []string{
+		"manifest",
+		"MANIFEST",
+		"manifest.json",
+		"manifest.yaml",
+		"manifest.yml",
+	}
+	for _, name := range manifestCandidates {
+		p := filepath.Join(e.cfg.DataDir, name)
+		info, err := os.Stat(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		out = append(out, checkpointFile{
+			src:     p,
+			relDest: name,
+		})
+	}
+
+	return out, nil
+}
+
 func (e *Engine) flushMemtable() error {
 	records, ok := e.mem.NextFlushBatch()
 	if !ok {
@@ -854,6 +1000,9 @@ func (e *Engine) ApplyRecord(rec model.Record, fromWAL bool) error {
 }
 
 func (e *Engine) applyBatchRecords(records []model.Record) error {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+
 	if len(records) == 0 {
 		return nil
 	}

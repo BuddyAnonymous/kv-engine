@@ -280,6 +280,30 @@ func (m *MemtableManager) NextFlushBatch() ([]model.Record, bool) {
 	return recs, true
 }
 
+func (m *MemtableManager) ForceFlushAll() ([][]model.Record, error) {
+	batches := make([][]model.Record, 0)
+
+	if m.used[m.active] && m.tables[m.active] != nil && !m.activeFrozen {
+		if len(m.tables[m.active].RecordsSorted()) > 0 {
+			m.roQueue = append(m.roQueue, m.active)
+			m.activeFrozen = true
+		}
+	}
+
+	for {
+		recs, ok := m.NextFlushBatch()
+		if !ok {
+			break
+		}
+		if len(recs) == 0 {
+			continue
+		}
+		batches = append(batches, recs)
+	}
+
+	return batches, nil
+}
+
 func (m *MemtableManager) deepClone() (*MemtableManager, error) {
 	clone := &MemtableManager{
 		tables:       make([]Memtable, len(m.tables)),
