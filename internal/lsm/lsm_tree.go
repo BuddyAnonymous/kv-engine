@@ -78,12 +78,28 @@ func (t *LSMTree) Get(key string) ([]byte, bool, error) {
 // GetRecord searches for the latest visible KV record through all levels (L0..Ln),
 // newest first at each level.
 // A tombstone/expired KV on a higher level hides all older levels.
+// For leveled compaction, L1+ tables have non-overlapping key ranges, so the
+// search uses summary key-range filtering to skip irrelevant tables efficiently.
 func (t *LSMTree) GetRecord(key string) (model.Record, bool, error) {
 
 	now := uint64(time.Now().Unix())
+	isLeveled := t.cfg.Algorithm == "leveled"
+
 	for lvl := 0; lvl < t.cfg.MaxLevels; lvl++ {
 		dir := t.levelDir(lvl)
-		rec, found, err := t.sst.GetLatestKVRecordFromDir(dir, key)
+
+		var rec model.Record
+		var found bool
+		var err error
+
+		if isLeveled && lvl > 0 {
+			// Leveled L1+: key ranges are non-overlapping, use range-aware search.
+			rec, found, err = t.sst.GetLatestKVRecordFromDirLeveled(dir, key)
+		} else {
+			// L0 (both algorithms) or size-tiered: ranges may overlap, check all newest-first.
+			rec, found, err = t.sst.GetLatestKVRecordFromDir(dir, key)
+		}
+
 		if err != nil {
 			return model.Record{}, false, err
 		}
