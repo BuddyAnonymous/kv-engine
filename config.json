@@ -26,6 +26,7 @@
   "lsm_leveled_l0_threshold": 4,
   "lsm_leveled_base_size_mb": 10,
   "lsm_leveled_multiplier": 10,
+  "lsm_max_sstable_size_mb": 2,
   "token_bucket_tokens": 100,
   "token_bucket_interval_ms": 1000
 }

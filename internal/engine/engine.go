@@ -97,6 +97,7 @@ func New(cfg config.Config) (*Engine, error) {
 		LeveledL0Threshold:    cfg.LSMLeveledL0Threshold,
 		LeveledBaseSizeMB:     cfg.LSMLeveledBaseSizeMB,
 		LeveledMultiplier:     cfg.LSMLeveledMultiplier,
+		MaxSSTableSizeMB:      cfg.LSMMaxSSTableSizeMB,
 	}
 
 	lsmTree, err := lsm.NewLSMTree(lsmCfg, sstMgr, sstBaseDir)
@@ -1099,6 +1100,7 @@ func (e *Engine) reloadRuntimeAfterRestore() error {
 		LeveledL0Threshold:    e.cfg.LSMLeveledL0Threshold,
 		LeveledBaseSizeMB:     e.cfg.LSMLeveledBaseSizeMB,
 		LeveledMultiplier:     e.cfg.LSMLeveledMultiplier,
+		MaxSSTableSizeMB:      e.cfg.LSMMaxSSTableSizeMB,
 	}
 	lsmTree, err := lsm.NewLSMTree(lsmCfg, sstMgr, sstBaseDir)
 	if err != nil {

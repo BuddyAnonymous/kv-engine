@@ -71,15 +71,17 @@ func (t *LSMTree) sizeTieredCompaction(deleted map[instanceKey]bool, epochBounda
 // leveledCompaction implements leveled compaction strategy.
 // L0: If the number of SSTables exceeds the threshold, all L0 SSTables are
 //
-//	merged with all L1 SSTables and the result is written to L1.
+//	merged with overlapping L1 SSTables and the result is written to L1
+//	as multiple SSTables chunked by MaxSSTableSizeMB.
 //
 // L1+: If the total data size at a level exceeds the target size for that level,
 //
-//	all SSTables are merged with the next level.
+//	the oldest SSTable is picked, merged with overlapping SSTables on the next level,
+//	and the result is written as chunked SSTables to the next level.
 //
 // Merge operands belonging to deleted probabilistic instances are purged.
 func (t *LSMTree) leveledCompaction(deleted map[instanceKey]bool, epochBoundary map[instanceKey]uint64) error {
-	// Phase 1: L0 compaction
+	// Phase 1: L0 compaction — merge ALL L0 SSTables with overlapping L1 SSTables.
 	l0Dir := t.levelDir(0)
 	l0Files, err := t.sst.ListDataFilesInDir(l0Dir)
 	if err != nil {
@@ -87,12 +89,12 @@ func (t *LSMTree) leveledCompaction(deleted map[instanceKey]bool, epochBoundary 
 	}
 
 	if len(l0Files) >= t.cfg.LeveledL0Threshold {
-		if err := t.compactLevel(0, deleted, epochBoundary); err != nil {
+		if err := t.compactL0(deleted, epochBoundary); err != nil {
 			return fmt.Errorf("leveled: compact L0: %w", err)
 		}
 	}
 
-	// Phase 2: L1+ compaction cascade
+	// Phase 2: L1+ compaction — pick oldest SSTable, merge with overlapping on L+1.
 	for lvl := 1; lvl < t.cfg.MaxLevels-1; lvl++ {
 		targetBytes := t.levelTargetSize(lvl)
 		dir := t.levelDir(lvl)
@@ -102,7 +104,7 @@ func (t *LSMTree) leveledCompaction(deleted map[instanceKey]bool, epochBoundary 
 		}
 
 		if currentSize > targetBytes {
-			if err := t.compactLevel(lvl, deleted, epochBoundary); err != nil {
+			if err := t.compactLeveledSingle(lvl, deleted, epochBoundary); err != nil {
 				return fmt.Errorf("leveled: compact L%d: %w", lvl, err)
 			}
 		}
@@ -127,42 +129,74 @@ func (t *LSMTree) levelTargetSize(level int) int64 {
 	return size
 }
 
-// compactLevel merges all SSTables from the given level with all SSTables from
-// the next level. The merged result is written to the next level and old SSTables
-// from both levels are deleted.
-func (t *LSMTree) compactLevel(level int, deleted map[instanceKey]bool, epochBoundary map[instanceKey]uint64) error {
-	srcDir := t.levelDir(level)
-	dstDir := t.levelDir(level + 1)
+// maxSSTableBytes returns the configured max SSTable size in bytes.
+func (t *LSMTree) maxSSTableBytes() int64 {
+	return int64(t.cfg.MaxSSTableSizeMB) * 1024 * 1024
+}
 
-	if err := os.MkdirAll(dstDir, 0755); err != nil {
-		return fmt.Errorf("compact: mkdir L%d: %w", level+1, err)
+// compactL0 merges ALL L0 SSTables with overlapping L1 SSTables.
+// L0 SSTables may have overlapping key ranges (they come from memtable flushes),
+// so we must merge all of them together. We compute the combined key range of all
+// L0 SSTables, find overlapping SSTables on L1, merge everything, and write the
+// result as chunked SSTables to L1.
+func (t *LSMTree) compactL0(deleted map[instanceKey]bool, epochBoundary map[instanceKey]uint64) error {
+	l0Dir := t.levelDir(0)
+	l1Dir := t.levelDir(1)
+
+	if err := os.MkdirAll(l1Dir, 0755); err != nil {
+		return fmt.Errorf("compactL0: mkdir L1: %w", err)
 	}
 
-	srcFiles, err := t.sst.ListDataFilesInDir(srcDir)
+	l0Files, err := t.sst.ListDataFilesInDir(l0Dir)
 	if err != nil {
-		return fmt.Errorf("compact: list L%d: %w", level, err)
+		return fmt.Errorf("compactL0: list L0: %w", err)
+	}
+	if len(l0Files) == 0 {
+		return nil
 	}
 
-	dstFiles, err := t.sst.ListDataFilesInDir(dstDir)
-	if err != nil {
-		return fmt.Errorf("compact: list L%d: %w", level+1, err)
-	}
-
-	// Read all records from source level
+	// Read all L0 records AND compute combined key range.
 	var batches [][]model.Record
-	for _, f := range srcFiles {
+	var globalMin, globalMax string
+	for _, f := range l0Files {
 		recs, err := t.sst.ReadAllRecordsFromFile(f)
 		if err != nil {
-			return fmt.Errorf("compact: read src %s: %w", f, err)
+			return fmt.Errorf("compactL0: read L0 %s: %w", f, err)
 		}
 		batches = append(batches, recs)
+
+		fMin, fMax, err := t.sst.GetKeyRangeForFile(f)
+		if err != nil {
+			// Fallback: scan records for min/max
+			for _, r := range recs {
+				if globalMin == "" || r.Key < globalMin {
+					globalMin = r.Key
+				}
+				if globalMax == "" || r.Key > globalMax {
+					globalMax = r.Key
+				}
+			}
+			continue
+		}
+		if globalMin == "" || fMin < globalMin {
+			globalMin = fMin
+		}
+		if globalMax == "" || fMax > globalMax {
+			globalMax = fMax
+		}
 	}
 
-	// Read all records from destination level
-	for _, f := range dstFiles {
+	// Find overlapping L1 SSTables.
+	overlapping, err := t.sst.FindOverlappingFiles(l1Dir, globalMin, globalMax)
+	if err != nil {
+		return fmt.Errorf("compactL0: find overlapping L1: %w", err)
+	}
+
+	// Read overlapping L1 records.
+	for _, f := range overlapping {
 		recs, err := t.sst.ReadAllRecordsFromFile(f)
 		if err != nil {
-			return fmt.Errorf("compact: read dst %s: %w", f, err)
+			return fmt.Errorf("compactL0: read L1 %s: %w", f, err)
 		}
 		batches = append(batches, recs)
 	}
@@ -171,24 +205,99 @@ func (t *LSMTree) compactLevel(level int, deleted map[instanceKey]bool, epochBou
 	merged = filterExpiredRecords(merged)
 	merged = filterStaleOperands(merged, deleted, epochBoundary)
 
-	// Write merged result to destination level
+	// Write merged result as chunked SSTables to L1.
 	if len(merged) > 0 {
-		if err := t.sst.FlushToDir(dstDir, merged); err != nil {
-			return fmt.Errorf("compact: flush to L%d: %w", level+1, err)
+		if err := t.sst.FlushToDirChunked(l1Dir, merged, t.maxSSTableBytes()); err != nil {
+			return fmt.Errorf("compactL0: flush to L1: %w", err)
 		}
 	}
 
-	// Delete old source SSTables
-	for _, f := range srcFiles {
+	// Delete old L0 SSTables.
+	for _, f := range l0Files {
 		if err := t.sst.DeleteSSTable(f); err != nil {
-			return fmt.Errorf("compact: delete src %s: %w", f, err)
+			return fmt.Errorf("compactL0: delete L0 %s: %w", f, err)
 		}
 	}
 
-	// Delete old destination SSTables
-	for _, f := range dstFiles {
+	// Delete old overlapping L1 SSTables.
+	for _, f := range overlapping {
 		if err := t.sst.DeleteSSTable(f); err != nil {
-			return fmt.Errorf("compact: delete dst %s: %w", f, err)
+			return fmt.Errorf("compactL0: delete L1 %s: %w", f, err)
+		}
+	}
+
+	return nil
+}
+
+// compactLeveledSingle picks the oldest SSTable from the given level, finds
+// overlapping SSTables on the next level, merges them, and writes the result
+// as chunked SSTables to the next level.
+func (t *LSMTree) compactLeveledSingle(level int, deleted map[instanceKey]bool, epochBoundary map[instanceKey]uint64) error {
+	srcDir := t.levelDir(level)
+	dstDir := t.levelDir(level + 1)
+
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		return fmt.Errorf("compact L%d: mkdir L%d: %w", level, level+1, err)
+	}
+
+	// Pick the oldest SSTable on this level.
+	oldest, err := t.sst.FindOldestFile(srcDir)
+	if err != nil {
+		return fmt.Errorf("compact L%d: find oldest: %w", level, err)
+	}
+	if oldest == "" {
+		return nil
+	}
+
+	// Read key range from the oldest SSTable's summary.
+	minKey, maxKey, err := t.sst.GetKeyRangeForFile(oldest)
+	if err != nil {
+		return fmt.Errorf("compact L%d: key range %s: %w", level, oldest, err)
+	}
+
+	// Find overlapping SSTables on the next level.
+	overlapping, err := t.sst.FindOverlappingFiles(dstDir, minKey, maxKey)
+	if err != nil {
+		return fmt.Errorf("compact L%d: find overlapping L%d: %w", level, level+1, err)
+	}
+
+	// Read all records from the selected source SSTable.
+	var batches [][]model.Record
+	srcRecs, err := t.sst.ReadAllRecordsFromFile(oldest)
+	if err != nil {
+		return fmt.Errorf("compact L%d: read %s: %w", level, oldest, err)
+	}
+	batches = append(batches, srcRecs)
+
+	// Read records from overlapping destination SSTables.
+	for _, f := range overlapping {
+		recs, err := t.sst.ReadAllRecordsFromFile(f)
+		if err != nil {
+			return fmt.Errorf("compact L%d: read dst %s: %w", level, f, err)
+		}
+		batches = append(batches, recs)
+	}
+
+	merged := mergeAndDedup(batches)
+	merged = filterExpiredRecords(merged)
+	merged = filterStaleOperands(merged, deleted, epochBoundary)
+
+	// Write merged result as chunked SSTables to the next level.
+	if len(merged) > 0 {
+		if err := t.sst.FlushToDirChunked(dstDir, merged, t.maxSSTableBytes()); err != nil {
+			return fmt.Errorf("compact L%d: flush to L%d: %w", level, level+1, err)
+		}
+	}
+
+	// Delete the selected source SSTable.
+	if err := t.sst.DeleteSSTable(oldest); err != nil {
+		return fmt.Errorf("compact L%d: delete src %s: %w", level, oldest, err)
+	}
+
+	// Delete old overlapping destination SSTables.
+	for _, f := range overlapping {
+		if err := t.sst.DeleteSSTable(f); err != nil {
+			return fmt.Errorf("compact L%d: delete dst %s: %w", level, f, err)
 		}
 	}
 

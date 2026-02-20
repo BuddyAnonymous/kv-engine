@@ -11,4 +11,5 @@ type LSMConfig struct {
 	LeveledL0Threshold int // broj SSTable-ova na L0 koji pokrece kompakciju
 	LeveledBaseSizeMB  int // ciljna velicina L1 u MB
 	LeveledMultiplier  int // faktor rasta izmedju nivoa (L_n+1 = multiplier * L_n)
+	MaxSSTableSizeMB   int // maksimalna velicina jedne SSTabele u MB (za chunked flush)
 }
