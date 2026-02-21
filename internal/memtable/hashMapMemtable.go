@@ -25,7 +25,7 @@ func NewHashMapMemtable(maxEntries int, maxBytes int64) Memtable {
 		currentBytes: 0,
 	}
 }
-
+// Puts a record into the memtable, handling both KV records and merge operands, and updating size estimates
 func (m *HashMapMemtable) Put(r model.Record) {
 	if r.Kind == model.RecordKindMergeOperand {
 		m.mergeOps[r.Key] = append(m.mergeOps[r.Key], r)
@@ -44,7 +44,7 @@ func (m *HashMapMemtable) Put(r model.Record) {
 	m.data[r.Key] = r
 	m.currentBytes += estimateRecordSize(&r)
 }
-
+// Get non merge operands for a key
 func (m *HashMapMemtable) Get(key string) model.GetResult {
 	rec, ok := m.data[key]
 	if !ok {
@@ -63,7 +63,7 @@ func (m *HashMapMemtable) Get(key string) model.GetResult {
 		Op:        rec.Op,
 	}
 }
-
+// Get merge operators for key and structure type
 func (m *HashMapMemtable) GetMergeOperands(structure model.StructureType, key string) []model.Record {
 	ops, ok := m.mergeOps[key]
 	if !ok || len(ops) == 0 {
@@ -81,7 +81,7 @@ func (m *HashMapMemtable) GetMergeOperands(structure model.StructureType, key st
 	}
 	return out
 }
-
+// Deletes a key by writing a tombstone record
 func (m *HashMapMemtable) Delete(r model.Record) {
 	r.Kind = model.RecordKindKV
 	r.Structure = model.StructureTypeNone
@@ -98,7 +98,7 @@ func (m *HashMapMemtable) Delete(r model.Record) {
 	m.data[r.Key] = r
 	m.currentBytes += estimateRecordSize(&r)
 }
-
+// Checks if memtable is full
 func (m *HashMapMemtable) IsFull() bool {
 	return m.entriesNum >= m.maxEntries || m.currentBytes >= m.maxBytes
 }
@@ -124,7 +124,7 @@ func (m *HashMapMemtable) Clone() Memtable {
 	}
 	return cloned
 }
-
+// Returns all records sorted by key...
 func (m *HashMapMemtable) RecordsSorted() []model.Record {
 	keys := make([]string, 0, len(m.data)+len(m.mergeOps))
 	for k := range m.data {
@@ -150,7 +150,7 @@ func (m *HashMapMemtable) RecordsSorted() []model.Record {
 	sortRecordsForFlush(out)
 	return out
 }
-
+// Drains the memtable and returns all records sorted, while also clearing the memtable for reuse
 func (m *HashMapMemtable) DrainSorted() []model.Record {
 	out := m.RecordsSorted()
 
@@ -158,9 +158,10 @@ func (m *HashMapMemtable) DrainSorted() []model.Record {
 	m.mergeOps = make(map[string][]model.Record)
 	m.entriesNum = 0
 	m.currentBytes = 0
+	sortRecordsForFlush(out)
 	return out
 }
-
+// SnapshotSorted returns a sorted slice of all records in the memtable without modifying it
 func (m *HashMapMemtable) SnapshotSorted() []model.Record {
 	keys := make([]string, 0, len(m.data))
 	for k := range m.data {
@@ -178,7 +179,7 @@ func (m *HashMapMemtable) SnapshotSorted() []model.Record {
 
 	return out
 }
-
+// Clones record
 func cloneRecord(r model.Record) model.Record {
 	out := r
 	if r.Value != nil {

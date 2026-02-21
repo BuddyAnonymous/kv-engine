@@ -24,7 +24,7 @@ type singleFileFooter struct {
 	MerkleOffset  uint64
 	MerkleLen     uint64
 }
-
+// Writes full single file sstable
 func (m *Manager) writeSingleFile(path string, records []model.Record) error {
 	if m.bm == nil {
 		return fmt.Errorf("block manager is nil")
@@ -117,7 +117,7 @@ func (m *Manager) writeSingleFile(path string, records []model.Record) error {
 	}
 	return m.writeTOC(basePath, tocModeSingle)
 }
-
+// Copies blocks when writing into single file sstable
 func (m *Manager) copyBlocks(srcPath, dstPath string, dstStartBlock uint64) (uint64, error) {
 	blockCount, err := m.countBlocks(srcPath, m.blockSize)
 	if err != nil {
@@ -134,7 +134,7 @@ func (m *Manager) copyBlocks(srcPath, dstPath string, dstStartBlock uint64) (uin
 	}
 	return blockCount, nil
 }
-
+// Encodes single file footer
 func (m *Manager) encodeSingleFooterPayload(f singleFileFooter) []byte {
 	payload := make([]byte, 0, 8+10*10)
 	payload = append(payload, m.encodeHeader(m.singleMagic)...)
@@ -150,7 +150,7 @@ func (m *Manager) encodeSingleFooterPayload(f singleFileFooter) []byte {
 	payload = append(payload, uvarintBytes(f.MerkleLen)...)
 	return payload
 }
-
+// Writes footer into single file sstable
 func (m *Manager) writeSingleFooter(path string, footerBlock uint64, f singleFileFooter) error {
 	payload := m.encodeSingleFooterPayload(f)
 	maxPayload := m.blockSize - crcBytes - payloadLenBytes
@@ -165,7 +165,7 @@ func (m *Manager) writeSingleFooter(path string, footerBlock uint64, f singleFil
 	binary.LittleEndian.PutUint32(blockData[m.blockSize-crcBytes:], crc)
 	return m.bm.WriteBlock(path, footerBlock, blockData, m.blockSize)
 }
-
+// Reads single file footer and returns it together with blockSize
 func (m *Manager) readSingleFooter(path string) (singleFileFooter, int, error) {
 	hdr, err := m.readFileHeader(path)
 	if err != nil {
@@ -232,7 +232,7 @@ func (m *Manager) readSingleFooter(path string) (singleFileFooter, int, error) {
 	}
 	return f, hdr.blockSize, nil
 }
-
+// Checks single file filter for key presence
 func (m *Manager) maybeKeyInSingleFilter(singlePath string, footer singleFileFooter, blockSize int, key string) (bool, error) {
 	if footer.FilterLen == 0 {
 		return true, nil
@@ -257,7 +257,7 @@ func (m *Manager) maybeKeyInSingleFilter(singlePath string, footer singleFileFoo
 	}
 	return bf.MightContain([]byte(key)), nil
 }
-
+// Gets latest KV record for key from single file sstable, if it exists
 func (m *Manager) getLatestKVFromSingleFile(singlePath string, footer singleFileFooter, blockSize int, key string) (model.Record, bool, error) {
 	startDataBlock, endDataBlock, ok, err := m.locateSingleDataRangeForAllKeyRecords(singlePath, footer, blockSize, key)
 	if err != nil {
@@ -268,7 +268,7 @@ func (m *Manager) getLatestKVFromSingleFile(singlePath string, footer singleFile
 	}
 	return m.searchSingleDataRangeForLatestKV(singlePath, footer, blockSize, key, startDataBlock, endDataBlock)
 }
-
+// Locates range of data blocks that may contain records for key in single file sstable
 func (m *Manager) locateSingleDataRangeForAllKeyRecords(singlePath string, footer singleFileFooter, blockSize int, key string) (startDataBlock, endDataBlock uint64, ok bool, err error) {
 	summ, err := m.readSingleSummaryMeta(singlePath, footer, blockSize, key)
 	if err != nil {
@@ -323,7 +323,7 @@ func (m *Manager) locateSingleDataRangeForAllKeyRecords(singlePath string, foote
 	}
 	return startDataBlock, endDataBlock, true, nil
 }
-
+// Reads single file summary meta (stride, min/max key) and summary entries if they may be relevant for key
 func (m *Manager) readSingleSummaryMeta(singlePath string, footer singleFileFooter, blockSize int, key string) (summaryMeta, error) {
 	if footer.SummaryLen == 0 {
 		return summaryMeta{}, fmt.Errorf("single file has empty summary section: %s", singlePath)
@@ -402,7 +402,7 @@ func (m *Manager) readSingleSummaryMeta(singlePath string, footer singleFileFoot
 		entries: entries,
 	}, nil
 }
-
+// Reads single file index entries from given block for key
 func (m *Manager) readSingleIndexEntriesFromBlock(singlePath string, footer singleFileFooter, blockSize int, startBlock uint64, targetKey string) ([]indexEntry, error) {
 	if footer.IndexLen == 0 || startBlock >= footer.IndexLen {
 		return nil, nil
@@ -467,7 +467,7 @@ func (m *Manager) readSingleIndexEntriesFromBlock(singlePath string, footer sing
 	}
 	return out, nil
 }
-
+// Searches given data block range for latest KV record for key in single file sstable
 func (m *Manager) searchSingleDataRangeForLatestKV(singlePath string, footer singleFileFooter, blockSize int, key string, startBlock, endBlock uint64) (model.Record, bool, error) {
 	prevKey := ""
 	var pending []byte
@@ -577,7 +577,7 @@ func (m *Manager) searchSingleDataRangeForLatestKV(singlePath string, footer sin
 	}
 	return best, found, nil
 }
-
+// Scans all records in single file sstable (onRec is condition)
 func (m *Manager) scanSingleDataSection(singlePath string, blockSize int, footer singleFileFooter, onRec func(model.Record) (bool, error)) error {
 	prevKey := ""
 	var pending []byte

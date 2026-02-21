@@ -6,6 +6,7 @@ import (
 	"hash/crc32"
 )
 
+// Flushes current block buffer to disk if needed
 func (w *blockWriter) ensure(n int) error {
 	if n > w.payloadCap() {
 		return fmt.Errorf("record too large for single block payload: need=%d cap=%d", n, w.payloadCap())
@@ -24,15 +25,15 @@ func (w *blockWriter) ensure(n int) error {
 	}
 	return nil
 }
-
+// payloadLenBytes | payload | crcBytes
 func (w *blockWriter) payloadCap() int {
 	return w.blockSize - crcBytes - payloadLenBytes
 }
-
+// | payloadLenBytes payload | crcBytes
 func (w *blockWriter) payloadAreaSize() int {
 	return w.blockSize - crcBytes
 }
-
+// Writes bytes into current block buffer, flushing if needed
 func (w *blockWriter) writeBytes(b []byte) error {
 	if err := w.ensure(len(b)); err != nil {
 		return err
@@ -41,7 +42,7 @@ func (w *blockWriter) writeBytes(b []byte) error {
 	w.pos += len(b)
 	return nil
 }
-
+// Flushes current block buffer to disk and checks CRC
 func (w *blockWriter) flushCurBlock() error {
 	payloadLen := w.pos - payloadLenBytes
 	binary.LittleEndian.PutUint32(w.curBlock[0:payloadLenBytes], uint32(payloadLen))
@@ -49,17 +50,17 @@ func (w *blockWriter) flushCurBlock() error {
 	binary.LittleEndian.PutUint32(w.curBlock[w.payloadAreaSize():], crc)
 	return w.bm.WriteBlock(w.path, w.curBlockNo, w.curBlock, w.blockSize)
 }
-
+// Used to flush when closing the block writer
 func (w *blockWriter) close() error {
 	return w.flushCurBlock()
 }
-
+// Helper function to not use slice
 func uvarintBytes(x uint64) []byte {
 	var tmp [10]byte
 	n := binary.PutUvarint(tmp[:], x)
 	return tmp[:n]
 }
-
+// Returns number of shared prefix characters
 func sharedPrefixLen(a, b string) int {
 	// a = prevKey, b = currentKey
 	na, nb := len(a), len(b)

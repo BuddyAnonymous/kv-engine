@@ -15,7 +15,7 @@ const (
 )
 
 // ---------- Public API ----------
-
+// Writes multi file
 func (m *Manager) WriteMultiFile(path string, records []model.Record) error {
 	if m.bm == nil {
 		return fmt.Errorf("block manager is nil")
@@ -60,7 +60,7 @@ func (m *Manager) WriteMultiFile(path string, records []model.Record) error {
 
 	return m.writeTOC(path, tocModeMulti)
 }
-
+// Writes single file
 func (m *Manager) WriteSingleFile(path string, records []model.Record) error {
 	return m.writeSingleFile(path, records)
 }
@@ -97,7 +97,7 @@ func newBlockWriter(bm *block.BlockManager, path string, blockSize int, onNewBlo
 }
 
 // ---------- DATA writing ----------
-
+// Writes data file for multi file sstable
 func (m *Manager) writeDataFile(dataPath string, recs []model.Record) ([]string, error) {
 
 	//Prvi ključevi svakog data bloka, koji će ići u INDEX fajl kao blockFirstKey.
@@ -344,7 +344,7 @@ type indexEntryLoc struct {
 	indexEntryNo uint64
 	indexBlockNo uint64
 }
-
+// Writes index file for mutli file sstable
 func (m *Manager) writeIndexFile(indexPath string, dataFirstKeys []string) ([]indexEntryLoc, error) {
 	var locs []indexEntryLoc
 	prevKey := ""
@@ -403,7 +403,7 @@ func (m *Manager) writeIndexFile(indexPath string, dataFirstKeys []string) ([]in
 }
 
 // ---------- SUMMARY writing ----------
-
+// Writes summary file for multi file sstable
 func (m *Manager) writeSummaryFile(summaryPath string, locs []indexEntryLoc, dataFirstKeys []string, maxKey string) error {
 
 	minKey := ""

@@ -36,7 +36,7 @@ type fileHeader struct {
 	blockSize int
 	flags     uint16
 }
-
+// Get value for key from sstable
 func (m *Manager) Get(key string) ([]byte, bool, error) {
 
 	tables, err := m.listAllTableRefsNewestFirst()
@@ -101,7 +101,7 @@ func (m *Manager) Get(key string) ([]byte, bool, error) {
 
 	return nil, false, nil
 }
-
+// Returns sorted keys that are alive (not deleted or expired) in given key range [startKey, endKey]
 func (m *Manager) ListLiveKeysInRange(startKey, endKey string) ([]string, error) {
 	if startKey == "" || endKey == "" {
 		return nil, fmt.Errorf("range keys must not be empty")
@@ -162,7 +162,7 @@ func (m *Manager) ListLiveKeysInRange(startKey, endKey string) ([]string, error)
 	sort.Strings(keys)
 	return keys, nil
 }
-
+// Lists all KV records in given key range [startKey, endKey] from single file sstable
 func (m *Manager) listKVRecordsFromSingleFileInRange(singlePath, startKey, endKey string) ([]model.Record, error) {
 	footer, blockSize, err := m.readSingleFooter(singlePath)
 	if err != nil {
@@ -187,7 +187,7 @@ func (m *Manager) listKVRecordsFromSingleFileInRange(singlePath, startKey, endKe
 	}
 	return out, nil
 }
-
+// Gets all merge operands for key from sstable
 func (m *Manager) GetMergeOperands(structure model.StructureType, key string) ([]model.Record, error) {
 
 	if structure == model.StructureTypeNone {
@@ -280,7 +280,7 @@ func (m *Manager) GetMergeOperands(structure model.StructureType, key string) ([
 
 	return ops, nil
 }
-
+// Gets latest KV record for key from multi file sstable
 func (m *Manager) getLatestKVFromDataFile(dataPath, key string) (model.Record, bool, error) {
 
 	blockSize, startDataBlock, endDataBlock, ok, err := m.locateDataRangeForAllKeyRecords(dataPath, key)
@@ -292,7 +292,7 @@ func (m *Manager) getLatestKVFromDataFile(dataPath, key string) (model.Record, b
 	}
 	return m.searchDataRangeForLatestKV(dataPath, blockSize, key, startDataBlock, endDataBlock)
 }
-
+// Gets all records for key from multi file sstable
 func (m *Manager) getKeyRecordsFromDataFile(dataPath, key string) ([]model.Record, bool, error) {
 
 	blockSize, startDataBlock, endDataBlock, ok, err := m.locateDataRangeForAllKeyRecords(dataPath, key)
@@ -304,7 +304,7 @@ func (m *Manager) getKeyRecordsFromDataFile(dataPath, key string) ([]model.Recor
 	}
 	return m.searchDataRangeForKey(dataPath, blockSize, key, startDataBlock, endDataBlock)
 }
-
+// Returns all records in range [startKey, endKey] from multi file sstable
 func (m *Manager) listKVRecordsFromDataFileInRange(dataPath, startKey, endKey string) ([]model.Record, error) {
 	dataHdr, err := m.readFileHeader(dataPath)
 	if err != nil {
@@ -323,7 +323,7 @@ func (m *Manager) listKVRecordsFromDataFileInRange(dataPath, startKey, endKey st
 	}
 	return m.searchDataRangeForKVInRange(dataPath, dataHdr.blockSize, startKey, endKey, 0, endBlock)
 }
-
+// Returns range where all records for key are located in multi file sstable (using summary and index)
 func (m *Manager) locateDataRangeForAllKeyRecords(dataPath, key string) (blockSize int, startDataBlock, endDataBlock uint64, ok bool, err error) {
 
 	basePath := strings.TrimSuffix(dataPath, ".data")
@@ -414,7 +414,7 @@ func (m *Manager) locateDataRangeForAllKeyRecords(dataPath, key string) (blockSi
 
 	return dataHdr.blockSize, startDataBlock, endDataBlock, true, nil
 }
-
+// Returns all records for key from given data block range in multi file sstable
 func (m *Manager) searchDataRangeForKey(dataPath string, blockSize int, key string, startBlock, endBlock uint64) ([]model.Record, bool, error) {
 
 	prevKey := ""
@@ -518,7 +518,7 @@ func (m *Manager) searchDataRangeForKey(dataPath string, blockSize int, key stri
 	}
 	return out, len(out) > 0, nil
 }
-
+// Returns latest KV record for key from given data block range in multi file sstable
 func (m *Manager) searchDataRangeForLatestKV(dataPath string, blockSize int, key string, startBlock, endBlock uint64) (model.Record, bool, error) {
 
 	prevKey := ""
@@ -629,7 +629,7 @@ func (m *Manager) searchDataRangeForLatestKV(dataPath string, blockSize int, key
 	}
 	return best, found, nil
 }
-
+// Returns all records with key between startKey and endKey from given data block range in multi file sstable
 func (m *Manager) searchDataRangeForKVInRange(dataPath string, blockSize int, startKey, endKey string, startBlock, endBlock uint64) ([]model.Record, error) {
 	prevKey := ""
 	var pending []byte
@@ -734,7 +734,7 @@ func (m *Manager) searchDataRangeForKVInRange(dataPath string, blockSize int, st
 	}
 	return out, nil
 }
-
+// Decodes a data record from buffer using prevKey for shared prefix
 func decodeDataRecord(buf []byte, prevKey string) (model.Record, int, error) {
 
 	off := 0
@@ -815,7 +815,7 @@ func decodeDataRecord(buf []byte, prevKey string) (model.Record, int, error) {
 	}
 	return rec, off, nil
 }
-
+// Reads summary metadata (stride, min/max keys, summary entries) from summary file. If key is provided, only reads entries up to the key.
 func (m *Manager) readSummaryMeta(path string, blockSize int, key string) (summaryMeta, error) {
 
 	blockCount, err := m.countBlocks(path, blockSize)
@@ -900,7 +900,7 @@ func (m *Manager) readSummaryMeta(path string, blockSize int, key string) (summa
 		entries: entries,
 	}, nil
 }
-
+// Decodes summary entries from summary block payload starting at given offset. If targetKey is provided, only decodes entries up to the key.
 func decodeSummaryEntries(payload []byte, start int, targetKey string) ([]summaryEntry, error) {
 
 	off := start
@@ -943,7 +943,7 @@ func decodeSummaryEntries(payload []byte, start int, targetKey string) ([]summar
 	}
 	return out, nil
 }
-
+// Reads index entries from given index block onwards. If targetKey is provided, only reads entries up to the key.
 func (m *Manager) readIndexEntriesFromBlock(path string, blockSize int, startBlock uint64, targetKey string) ([]indexEntry, error) {
 
 	blockCount, err := m.countBlocks(path, blockSize)
@@ -1015,7 +1015,7 @@ func (m *Manager) readIndexEntriesFromBlock(path string, blockSize int, startBlo
 
 	return out, nil
 }
-
+// Reads and validates a single block payload from given file path, block size and block number. Validations include checking payload length and CRC.
 func (m *Manager) readPayloadBlock(path string, blockSize int, blockNo uint64) ([]byte, error) {
 
 	blockData, err := m.bm.ReadBlock(path, blockNo, blockSize)
@@ -1039,7 +1039,7 @@ func (m *Manager) readPayloadBlock(path string, blockSize int, blockNo uint64) (
 	copy(payload, blockData[payloadLenBytes:payloadLenBytes+payloadLen])
 	return payload, nil
 }
-
+// Counts number of blocks in given file path based on file size and block size. Validates that file size is a multiple of block size.
 func (m *Manager) countBlocks(path string, blockSize int) (uint64, error) {
 
 	if blockSize <= 0 {
@@ -1058,7 +1058,7 @@ func (m *Manager) countBlocks(path string, blockSize int) (uint64, error) {
 	}
 	return uint64(size / int64(blockSize)), nil
 }
-
+// Reads and validates file header from given file path
 func (m *Manager) readFileHeader(path string) (fileHeader, error) {
 
 	// Layout: [payloadLen(4B)] [magic(4B)|blockSize(u16)|flags(u16)] ...
@@ -1083,7 +1083,7 @@ func (m *Manager) readFileHeader(path string) (fileHeader, error) {
 		flags:     flags,
 	}, nil
 }
-
+// Reads an unsigned varint from given byte slice starting at offset, and advances the offset
 func readUvarintAt(b []byte, off *int) (uint64, error) {
 
 	if *off >= len(b) {
@@ -1096,7 +1096,7 @@ func readUvarintAt(b []byte, off *int) (uint64, error) {
 	*off += n
 	return v, nil
 }
-
+// Validates that a chunk length n is non-negative and does not exceed available bytes, returning it as int
 func checkedChunkLen(n uint64, available int, what string) (int, error) {
 
 	if available < 0 {
@@ -1107,7 +1107,7 @@ func checkedChunkLen(n uint64, available int, what string) (int, error) {
 	}
 	return int(n), nil
 }
-
+// Checks if a record is expired based on its ExpiresAt field and current time
 func isExpired(rec model.Record, now uint64) bool {
 
 	return rec.ExpiresAt > 0 && rec.ExpiresAt <= now
@@ -1203,7 +1203,6 @@ func (m *Manager) readSummaryMinMaxFromSingle(singlePath string, footer singleFi
 }
 
 // getTableKeyRange returns the min and max key for a given table reference.
-// This is a lightweight read that only decodes the summary header block.
 func (m *Manager) getTableKeyRange(tbl tableRef) (string, string, error) {
 	switch tbl.mode {
 	case tocModeMulti:
@@ -1826,7 +1825,7 @@ func (m *Manager) CollectKVPrefixFromDir(dir, prefix string) ([]model.Record, er
 	}
 	return out, nil
 }
-
+// locateDataRangeForScan locates the range of data blocks in a .data file that may contain records in the given key range
 func (m *Manager) locateDataRangeForScan(dataPath, startKey, endKey string, endExclusive bool) (blockSize int, startDataBlock, endDataBlock uint64, ok bool, err error) {
 
 	basePath := strings.TrimSuffix(dataPath, ".data")
@@ -1913,7 +1912,7 @@ func (m *Manager) locateDataRangeForScan(dataPath, startKey, endKey string, endE
 
 	return dataHdr.blockSize, startDataBlock, endDataBlock, true, nil
 }
-
+// Scans a range of data blocks in a .data file for KV records in the given key range, with optional prefix filtering
 func (m *Manager) scanDataRangeForKV(dataPath string, blockSize int, startBlock, endBlock uint64, startKey, endKey string, endExclusive bool, prefix string) ([]model.Record, error) {
 
 	prevKey := ""
@@ -2068,7 +2067,7 @@ func (m *Manager) scanDataRangeForKV(dataPath string, blockSize int, startBlock,
 	}
 	return out, nil
 }
-
+// Returns whether the given key range overlaps with the table's key range, taking into account optional end exclusivity
 func rangeOverlapsTable(startKey, endKey string, endExclusive bool, tableMin, tableMax string) bool {
 
 	if tableMax != "" && startKey != "" && startKey > tableMax {
@@ -2087,7 +2086,7 @@ func rangeOverlapsTable(startKey, endKey string, endExclusive bool, tableMin, ta
 	}
 	return true
 }
-
+// returns upper bound string for a prefix
 func prefixUpperBound(prefix string) (string, bool) {
 
 	if prefix == "" {

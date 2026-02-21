@@ -14,7 +14,7 @@ import (
 )
 
 const probMetaBlockSize = 4 * 1024
-
+// Appends a new ProbMeta record to the probmeta file
 func (m *Manager) AppendProbMeta(rec model.ProbMetaRecord) error {
 	if rec.Key == "" {
 		return errors.New("probmeta key is empty")
@@ -84,6 +84,7 @@ func (m *Manager) AppendProbMeta(rec model.ProbMetaRecord) error {
 	return err
 }
 
+// returns latest ProbMeta for key and structure
 func (m *Manager) GetLatestProbMeta(structure model.StructureType, key string) (model.ProbMetaRecord, bool, error) {
 	p := m.probMetaPath()
 	blockCount, err := m.countBlocks(p, probMetaBlockSize)
@@ -136,6 +137,7 @@ func (m *Manager) GetLatestProbMeta(structure model.StructureType, key string) (
 	return best, found, nil
 }
 
+// Returns max seq number from all ProbMeta records
 func (m *Manager) MaxProbMetaSeq() (uint64, error) {
 	p := m.probMetaPath()
 	blockCount, err := m.countBlocks(p, probMetaBlockSize)
@@ -181,10 +183,11 @@ func (m *Manager) MaxProbMetaSeq() (uint64, error) {
 	return maxSeq, nil
 }
 
+// Returns path to probmeta file
 func (m *Manager) probMetaPath() string {
 	return filepath.Join(m.dir, "sst.probmeta")
 }
-
+// Encodes ProbMeta record
 func encodeProbMetaRecord(rec model.ProbMetaRecord) ([]byte, error) {
 	action, err := encodeProbMetaAction(rec.Action)
 	if err != nil {
@@ -213,7 +216,7 @@ func encodeProbMetaRecord(rec model.ProbMetaRecord) ([]byte, error) {
 	b.Write(uvarintBytes(uint64(rec.HLLSeed)))
 	return b.Bytes(), nil
 }
-
+// Decodes ProbMeta record
 func decodeProbMetaRecord(payload []byte) (model.ProbMetaRecord, error) {
 	off := 0
 	if len(payload) < 1 {
@@ -295,7 +298,7 @@ func decodeProbMetaRecord(payload []byte) (model.ProbMetaRecord, error) {
 		HLLSeed:             uint32(hllSeed),
 	}, nil
 }
-
+// Encodes ProbMeta action (create/delete)
 func encodeProbMetaAction(a model.ProbMetaAction) (byte, error) {
 	switch a {
 	case model.ProbMetaActionCreate:
@@ -306,7 +309,7 @@ func encodeProbMetaAction(a model.ProbMetaAction) (byte, error) {
 		return 0, errors.New("invalid probmeta action")
 	}
 }
-
+// Decodes ProbMeta action
 func decodeProbMetaAction(b byte) (model.ProbMetaAction, error) {
 	switch b {
 	case 1:
@@ -317,7 +320,7 @@ func decodeProbMetaAction(b byte) (model.ProbMetaAction, error) {
 		return "", errors.New("invalid probmeta action")
 	}
 }
-
+// Helper function to read uvarint from byte slice and advance offset
 func readUvarintFromBytes(b []byte, off *int) (uint64, error) {
 	if *off >= len(b) {
 		return 0, errors.New("uvarint offset out of range")
@@ -329,7 +332,7 @@ func readUvarintFromBytes(b []byte, off *int) (uint64, error) {
 	*off += n
 	return v, nil
 }
-
+// Decodeds ProbMeta payload
 func decodeProbMetaPayload(payload []byte, onRecord func(model.ProbMetaRecord) error) error {
 	off := 0
 	for off < len(payload) {

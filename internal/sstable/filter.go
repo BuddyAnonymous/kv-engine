@@ -10,7 +10,7 @@ import (
 )
 
 const bloomFalsePositiveRate = 0.01
-
+// Write filter file with given records
 func (m *Manager) writeFilterFile(filterPath string, records []model.Record) error {
 	expected := len(records)
 	if expected < 1 {
@@ -58,7 +58,7 @@ func (m *Manager) writeFilterFile(filterPath string, records []model.Record) err
 
 	return bw.close()
 }
-
+// Check if key might be in sstable
 func (m *Manager) maybeKeyInFilter(dataPath, key string) (bool, error) {
 	basePath := strings.TrimSuffix(dataPath, ".data")
 	filterPath := basePath + ".filter"

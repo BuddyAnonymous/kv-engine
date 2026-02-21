@@ -13,7 +13,7 @@ import (
 )
 
 const merkleFormatVersion = 1
-
+// Write whole merkle file
 func (m *Manager) writeMerkleFile(merklePath string, records []model.Record) error {
 	leafHashes := make([][32]byte, 0, len(records))
 	for _, rec := range records {
@@ -44,7 +44,7 @@ func (m *Manager) writeMerkleFile(merklePath string, records []model.Record) err
 	}
 	return bw.close()
 }
-
+// Validates merkle root of the given SSTable, returning validation result with details
 func (m *Manager) ValidateMerkle(table string) (model.MerkleValidationResult, error) {
 	basePath, err := m.resolveSSTBasePath(table)
 	if err != nil {
@@ -65,7 +65,7 @@ func (m *Manager) ValidateMerkle(table string) (model.MerkleValidationResult, er
 		return model.MerkleValidationResult{}, fmt.Errorf("unsupported sstable mode %d for %s", mode, basePath)
 	}
 }
-
+// Reads merkle file and returns expected root and leaf hashes
 func (m *Manager) readMerkleFile(path string) ([32]byte, [][32]byte, error) {
 	hdr, err := m.readFileHeader(path)
 	if err != nil {
@@ -82,6 +82,7 @@ func (m *Manager) readMerkleFile(path string) ([32]byte, [][32]byte, error) {
 	return m.parseMerklePayload(payload, path)
 }
 
+// Reads all data values from data file, used for merkle validation
 func (m *Manager) readAllDataValues(dataPath string) ([][]byte, error) {
 	hdr, err := m.readFileHeader(dataPath)
 	if err != nil {
@@ -179,7 +180,7 @@ func (m *Manager) readAllDataValues(dataPath string) ([][]byte, error) {
 	}
 	return values, nil
 }
-
+// Returns roothash from leaves
 func buildMerkleRoot(leaves [][32]byte) [32]byte {
 	if len(leaves) == 0 {
 		return sha256.Sum256(nil)
@@ -202,7 +203,7 @@ func buildMerkleRoot(leaves [][32]byte) [32]byte {
 	}
 	return level[0]
 }
-
+// Returns indexes of leaf hashes that differ between expected and actual
 func diffLeafHashes(expected, actual [][32]byte) []int {
 	min := len(expected)
 	if len(actual) < min {
@@ -222,7 +223,7 @@ func diffLeafHashes(expected, actual [][32]byte) []int {
 	}
 	return changed
 }
-
+// Na osnovu sstable imena vraca putanju do sstable
 func (m *Manager) resolveSSTBasePath(table string) (string, error) {
 	name := strings.TrimSpace(table)
 	if name == "" {
@@ -289,7 +290,7 @@ func (m *Manager) resolveSSTBasePath(table string) (string, error) {
 	// Keep old behavior fallback for error reporting in resolveTableMode.
 	return filepath.Join(m.dir, name), nil
 }
-
+// Checks if any SSTable artifact files exist for the given base path
 func hasSSTableArtifacts(basePath string) (bool, error) {
 	for _, ext := range []string{".toc", ".sst", ".data"} {
 		p := basePath + ext
@@ -303,7 +304,7 @@ func hasSSTableArtifacts(basePath string) (bool, error) {
 	}
 	return false, nil
 }
-
+// Validates multi file merkle
 func (m *Manager) validateMultiFileMerkle(basePath string) (model.MerkleValidationResult, error) {
 	expRoot, expLeaves, err := m.readMerkleFile(basePath + ".merkle")
 	if err != nil {
@@ -316,7 +317,7 @@ func (m *Manager) validateMultiFileMerkle(basePath string) (model.MerkleValidati
 
 	return buildMerkleValidationResult(values, expRoot, expLeaves), nil
 }
-
+// Validates single file merkle
 func (m *Manager) validateSingleFileMerkle(basePath string) (model.MerkleValidationResult, error) {
 	singlePath := basePath + ".sst"
 	footer, blockSize, err := m.readSingleFooter(singlePath)
@@ -335,7 +336,7 @@ func (m *Manager) validateSingleFileMerkle(basePath string) (model.MerkleValidat
 
 	return buildMerkleValidationResult(values, expRoot, expLeaves), nil
 }
-
+// Returns merkleValidationResult with details about validation, including expected vs actual root, leaf count, and indexes of changed leaves
 func buildMerkleValidationResult(values [][]byte, expRoot [32]byte, expLeaves [][32]byte) model.MerkleValidationResult {
 	actLeaves := make([][32]byte, 0, len(values))
 	for _, v := range values {
@@ -355,7 +356,7 @@ func buildMerkleValidationResult(values [][]byte, expRoot [32]byte, expLeaves []
 		ActualLeafCount:    len(actLeaves),
 	}
 }
-
+// Returns tocMode (single / multi file)
 func (m *Manager) resolveTableMode(basePath string) (uint64, error) {
 	tocPath := basePath + ".toc"
 	if _, err := os.Stat(tocPath); err == nil {
@@ -377,7 +378,7 @@ func (m *Manager) resolveTableMode(basePath string) (uint64, error) {
 
 	return 0, fmt.Errorf("sstable not found for base path %s", basePath)
 }
-
+// Reads merkle section from single file
 func (m *Manager) readMerkleFromSingleSection(singlePath string, footer singleFileFooter, blockSize int) ([32]byte, [][32]byte, error) {
 	if footer.MerkleLen == 0 {
 		return [32]byte{}, nil, fmt.Errorf("single file has empty merkle section: %s", singlePath)
@@ -394,7 +395,7 @@ func (m *Manager) readMerkleFromSingleSection(singlePath string, footer singleFi
 
 	return m.parseMerklePayload(payload, singlePath)
 }
-
+// Reads all data values from single file, used for merkle validation
 func (m *Manager) readAllSingleDataValues(singlePath string, footer singleFileFooter, blockSize int) ([][]byte, error) {
 	values := make([][]byte, 0)
 	err := m.scanSingleDataSection(singlePath, blockSize, footer, func(rec model.Record) (bool, error) {
@@ -406,7 +407,7 @@ func (m *Manager) readAllSingleDataValues(singlePath string, footer singleFileFo
 	}
 	return values, nil
 }
-
+// Returns roothash and leaf hashes from merkle payload
 func (m *Manager) parseMerklePayload(payload []byte, path string) ([32]byte, [][32]byte, error) {
 	if len(payload) < 8 {
 		return [32]byte{}, nil, fmt.Errorf("merkle header too short in %s", path)

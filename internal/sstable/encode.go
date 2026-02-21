@@ -26,7 +26,7 @@ func (m *Manager) encodeHeader(magic [4]byte) []byte {
 	return h
 }
 
-// encodeDataRecord creates encoded bytes for one data record.
+// Creates encoded bytes for one data record
 func (m *Manager) encodeDataRecord(prevKey string, r model.Record) ([]byte, string, error) {
 	key := r.Key
 
@@ -58,7 +58,7 @@ func (m *Manager) encodeDataRecord(prevKey string, r model.Record) ([]byte, stri
 
 	return buf.Bytes(), key, nil
 }
-
+// Encodes index entry
 func encodeIndexEntry(prevKey, key string, dataBlockNo uint64) ([]byte, string) {
 	shared := 0
 	if prevKey != "" {
@@ -73,7 +73,7 @@ func encodeIndexEntry(prevKey, key string, dataBlockNo uint64) ([]byte, string) 
 	buf.Write(uvarintBytes(dataBlockNo))
 	return buf.Bytes(), key
 }
-
+// Encodes summary entry
 func encodeSummaryEntry(prevKey, key string, indexBlockNo uint64) ([]byte, string) {
 	shared := 0
 	if prevKey != "" {
@@ -89,6 +89,7 @@ func encodeSummaryEntry(prevKey, key string, indexBlockNo uint64) ([]byte, strin
 	return buf.Bytes(), key
 }
 
+// Encodes data record header (all but value)
 func encodeDataHeader(prevKey string, r model.Record) (hdr []byte, err error) {
 	var buf bytes.Buffer
 
@@ -113,6 +114,7 @@ func encodeDataHeader(prevKey string, r model.Record) (hdr []byte, err error) {
 	return buf.Bytes(), nil
 }
 
+// Encodes recFlags
 func encodeRecordFlags(r model.Record) byte {
 	var flags byte
 	if r.Tombstone {

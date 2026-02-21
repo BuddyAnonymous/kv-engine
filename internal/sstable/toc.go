@@ -12,7 +12,7 @@ const (
 	tocModeMulti  uint64 = 1
 	tocModeSingle uint64 = 2
 )
-
+// Writes TOC file with given mode (multi/single)
 func (m *Manager) writeTOC(basePath string, mode uint64) error {
 	if mode != tocModeMulti && mode != tocModeSingle {
 		return fmt.Errorf("invalid toc mode: %d", mode)
@@ -40,7 +40,7 @@ func (m *Manager) writeTOC(basePath string, mode uint64) error {
 	}
 	return bw.close()
 }
-
+// Returns TOC mode
 func (m *Manager) readTOCMode(tocPath string) (uint64, error) {
 	hdr, err := m.readFileHeader(tocPath)
 	if err != nil {
@@ -81,7 +81,7 @@ func (m *Manager) readTOCMode(tocPath string) (uint64, error) {
 	}
 	return mode, nil
 }
-
+// Return timestamp from file name
 func parseSSTTimestampFromBase(baseName string) int64 {
 	trimmed := strings.TrimPrefix(baseName, "sst_")
 	v, err := strconv.ParseInt(trimmed, 10, 64)

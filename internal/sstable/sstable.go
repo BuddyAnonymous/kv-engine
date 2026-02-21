@@ -43,7 +43,7 @@ func New(dir string, multiFileSSTable bool, bm *block.BlockManager, blockSize in
 		tocMagic:         [4]byte{'T', 'O', 'C', '!'},
 	}
 }
-
+// Flushes sorted records into sstable
 func (m *Manager) Flush(records []model.Record) error {
 
 	if err := os.MkdirAll(m.dir, 0755); err != nil {
@@ -99,5 +99,5 @@ func (m *Manager) DeleteSSTable(basePath string) error {
 	}
 	return nil
 }
-
+// Checks if interface is implemented
 var _ ManagerIface = (*Manager)(nil)

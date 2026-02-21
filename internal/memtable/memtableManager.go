@@ -296,7 +296,7 @@ func (m *MemtableManager) NextFlushBatch() ([]model.Record, bool) {
 
 	return recs, true
 }
-
+// Forces flush for checkpoint
 func (m *MemtableManager) ForceFlushAll() ([][]model.Record, error) {
 	batches := make([][]model.Record, 0)
 
