@@ -44,6 +44,8 @@ type Engine struct {
 
 	rl      *ratelimit.TokenBucket
 	history map[string][]model.Record
+	// Max flushed seq observed while WAL pointer is not initialized (startup replay path).
+	replayFlushedMaxSeq uint64
 
 	snapshots   map[string]snapshotPoint
 	snapshotCtr uint64
@@ -132,6 +134,9 @@ func New(cfg config.Config) (*Engine, error) {
 	e.wal = walManager
 	if lastSeq > e.seq {
 		e.seq = lastSeq
+	}
+	if err := e.finalizeReplayWALCleanup(); err != nil {
+		return nil, err
 	}
 
 	maxProbMetaSeq, err := e.sst.MaxProbMetaSeq()
@@ -994,22 +999,43 @@ func (e *Engine) flushMemtable() error {
 	}
 	e.bumpCacheEpoch()
 
+	var maxSeq uint64
+	for _, rec := range records {
+		if rec.Seq > maxSeq {
+			maxSeq = rec.Seq
+		}
+	}
+	if maxSeq == 0 {
+		return nil
+	}
+
 	// During startup WAL replay e.wal is not assigned yet. In normal runtime,
 	// after a successful flush we can safely drop fully persisted WAL segments.
 	if e.wal != nil {
-		var maxSeq uint64
-		for _, rec := range records {
-			if rec.Seq > maxSeq {
-				maxSeq = rec.Seq
-			}
+		if err := e.wal.CheckWAL(maxSeq); err != nil {
+			return err
 		}
-		if maxSeq > 0 {
-			if err := e.wal.CheckWAL(maxSeq); err != nil {
-				return err
-			}
-		}
+	} else if maxSeq > e.replayFlushedMaxSeq {
+		// Replay flush happened before WAL manager pointer was set.
+		e.replayFlushedMaxSeq = maxSeq
 	}
 
+	return nil
+}
+
+func (e *Engine) finalizeReplayWALCleanup() error {
+	if e.wal == nil || e.replayFlushedMaxSeq == 0 {
+		return nil
+	}
+	// Never move persisted seq backwards.
+	if e.replayFlushedMaxSeq <= e.wal.PersistedSeq {
+		e.replayFlushedMaxSeq = 0
+		return nil
+	}
+	if err := e.wal.CheckWAL(e.replayFlushedMaxSeq); err != nil {
+		return err
+	}
+	e.replayFlushedMaxSeq = 0
 	return nil
 }
 
@@ -1123,6 +1149,7 @@ func (e *Engine) reloadRuntimeAfterRestore() error {
 	e.iterators = make(map[uint64]*scanIterator)
 	e.nextIteratorID = 0
 	e.wal = nil
+	e.replayFlushedMaxSeq = 0
 
 	walManager, walErr, lastSeq := wal.NewWALManager(filepath.Join(e.cfg.DataDir, "wal"), e.cfg.SegmentBlocks, e.cfg.BlockSize, bm, e)
 	if walErr != nil {
@@ -1131,6 +1158,9 @@ func (e *Engine) reloadRuntimeAfterRestore() error {
 	e.wal = walManager
 	if lastSeq > e.seq {
 		e.seq = lastSeq
+	}
+	if err := e.finalizeReplayWALCleanup(); err != nil {
+		return err
 	}
 
 	maxProbMetaSeq, err := e.sst.MaxProbMetaSeq()

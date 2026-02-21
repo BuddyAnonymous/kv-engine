@@ -4,10 +4,10 @@
   "block_size": 8192,
   "cache_size": 4096,
   "block_cache_size": 4096,
-  "memtable_max_entries": 1000,
+  "memtable_max_entries": 500,
   "memtable_max_bytes": 1048576,
   "segment_blocks": 3,
-  "multi_file_sstable" : false,
+  "multi_file_sstable" : true,
   "memtable_type": "hashmap",
   "memtable_instances": 3,
   "btree_degree": 4,
@@ -27,6 +27,6 @@
   "lsm_leveled_base_size_mb": 10,
   "lsm_leveled_multiplier": 10,
   "lsm_max_sstable_size_mb": 2,
-  "token_bucket_tokens": 100,
-  "token_bucket_interval_ms": 1000
+  "token_bucket_tokens": 3000000,
+  "token_bucket_interval_ms": 1
 }
