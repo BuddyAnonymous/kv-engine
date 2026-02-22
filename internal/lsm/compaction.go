@@ -95,15 +95,20 @@ func (t *LSMTree) leveledCompaction(deleted map[instanceKey]bool, epochBoundary 
 	}
 
 	// Phase 2: L1+ compaction — pick oldest SSTable, merge with overlapping on L+1.
+	// Repeat compaction at each level until its size is within the target,
+	// since a single compaction may not be enough to bring it under the limit.
 	for lvl := 1; lvl < t.cfg.MaxLevels-1; lvl++ {
 		targetBytes := t.levelTargetSize(lvl)
 		dir := t.levelDir(lvl)
-		currentSize, err := t.sst.GetDirTotalSize(dir)
-		if err != nil {
-			return fmt.Errorf("leveled: size L%d: %w", lvl, err)
-		}
 
-		if currentSize > targetBytes {
+		for {
+			currentSize, err := t.sst.GetDirTotalSize(dir)
+			if err != nil {
+				return fmt.Errorf("leveled: size L%d: %w", lvl, err)
+			}
+			if currentSize <= targetBytes {
+				break
+			}
 			if err := t.compactLeveledSingle(lvl, deleted, epochBoundary); err != nil {
 				return fmt.Errorf("leveled: compact L%d: %w", lvl, err)
 			}
